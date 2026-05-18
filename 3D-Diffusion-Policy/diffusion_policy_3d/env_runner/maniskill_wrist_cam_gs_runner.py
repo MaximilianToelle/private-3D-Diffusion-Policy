@@ -102,8 +102,9 @@ class WristCamGSManiSkillRunner(BaseRunner):
 
         all_expert_trajectories = []
         all_policy_trajectories = []
+        all_num_unique_gaussians = []
 
-        for episode_idx in tqdm.tqdm(range(self.eval_episodes), desc=f"Eval ManiSkill {self.task_name}", leave=False, mininterval=self.tqdm_interval_sec):
+        for episode_idx in tqdm.tqdm(range(2), desc=f"Eval ManiSkill {self.task_name}", leave=False, mininterval=self.tqdm_interval_sec):
             
             init_state = None
             expert_q_sequence = None
@@ -136,6 +137,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
             is_success = False
 
             current_policy_q = []
+            current_num_unique_gaussians = []
 
             while not done:
                 current_pos = obs['agent_pos'].cpu().numpy()
@@ -152,7 +154,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
                     obs_dict_input['gs_positions'] = obs_dict['gs_positions'].unsqueeze(0)
                     obs_dict_input['point_cloud'] = obs_dict['gs_positions'].unsqueeze(0)
                     obs_dict_input['gs_rotations_9d'] = obs_dict['gs_rotations_9d'].unsqueeze(0)
-                    obs_dict_input['gs_surface_normals'] = obs_dict['gs_surface_normals'].unsqueeze(0)
+                    # obs_dict_input['gs_surface_normals'] = obs_dict['gs_surface_normals'].unsqueeze(0)
                     obs_dict_input['gs_log_scales'] = obs_dict['gs_log_scales'].unsqueeze(0)
                     obs_dict_input['gs_opacities'] = obs_dict['gs_opacities'].unsqueeze(0)
                     obs_dict_input['gs_rgb'] = obs_dict['gs_rgb'].unsqueeze(0)
@@ -163,6 +165,9 @@ class WristCamGSManiSkillRunner(BaseRunner):
                 pool_idx = policy.obs_encoder.extractor._latest_pool_indices
                 if len(pool_idx.shape) > 1:
                     pool_idx = pool_idx[-1]
+                    
+                current_num_unique_gaussians.append(len(torch.unique(pool_idx)))
+                
                 if len(obs_dict['gs_rgb'].shape) > 1:
                     obs_gs_rgb = obs_dict['gs_rgb'][-1]
                 # Inject the selected Gaussians back into the full original Gaussian scene
@@ -195,6 +200,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
 
             all_expert_trajectories.append(expert_q_sequence)
             all_policy_trajectories.append(np.array(current_policy_q))
+            all_num_unique_gaussians.append(np.array(current_num_unique_gaussians))
 
             if is_success:
                 all_num_steps_to_success.append(info["elapsed_steps"][-1].item())
@@ -226,6 +232,8 @@ class WristCamGSManiSkillRunner(BaseRunner):
             plot_dir = os.path.join(self.output_dir, "eval_plots")
             os.makedirs(plot_dir, exist_ok=True)
             plot_path = os.path.join(plot_dir, f"{prefix}_phase_corridor.png")
+            joint_pos_path = os.path.join(plot_dir, f"{prefix}_joint_pos_time.png")
+            num_unique_gs_path = os.path.join(plot_dir, f"{prefix}_num_unique_gaussians_time.png")
             
             control_dt = 1.0 / self.env.unwrapped.env.unwrapped.control_freq 
             
@@ -236,8 +244,22 @@ class WristCamGSManiSkillRunner(BaseRunner):
                 save_path=plot_path
             )
             cprint(f"Saved Phase Corridor plot to {plot_path}", "cyan")
+            
+            save_joint_pos_over_time_plot(
+                all_expert_trajectories, 
+                all_policy_trajectories, 
+                save_path=joint_pos_path
+            )
+            cprint(f"Saved Joint Position plot to {joint_pos_path}", "cyan")
+            
+            save_num_unique_gaussians_plot(
+                all_num_unique_gaussians,
+                save_path=num_unique_gs_path
+            )
+            cprint(f"Saved Num Unique Gaussians plot to {num_unique_gs_path}", "cyan")
+            
         except Exception as e:
-            cprint(f"Failed to generate phase corridor plot: {e}", "red")
+            cprint(f"Failed to generate plots: {e}", "red")
 
 
         def _mean(lst):
@@ -270,11 +292,14 @@ def save_phase_corridor_plot(
 ):
     """ Generates the Velocity vs Position Phase Plot for all joints."""
     
-    if len(expert_trajectories) == 0 or len(policy_trajectories) == 0:
+    if len(policy_trajectories) == 0:
         return None
 
-    # Get num joints from the first trajectory (assuming shape: T, num_joints)
-    num_joints = expert_trajectories[0].shape[1]
+    # Get num joints from the first trajectory
+    if len(expert_trajectories) > 0 and expert_trajectories[0] is not None:
+        num_joints = expert_trajectories[0].shape[1]
+    else:
+        num_joints = policy_trajectories[0].shape[1]
     
     fig, axes = plt.subplots(nrows=num_joints, ncols=1, figsize=(10, 3 * num_joints))
     if num_joints == 1: axes = [axes]
@@ -292,13 +317,14 @@ def save_phase_corridor_plot(
 
         # Plot all Expert Ground Truths (Thick, black, dashed)
         for i, e_q in enumerate(expert_trajectories):
-            e_dq = np.gradient(e_q, dt, axis=0)
-            e_dq[0] = 0.0   # np.gradient is inaccurate for t=0. Maniskill resets agent to zero velocity! 
-            label = 'Motion Planner (Expert)' if i == 0 else "_nolegend_"
-            ax.plot(e_q[:, j], e_dq[:, j], color='black', linewidth=2, label=label)
-            # Mark start and end targets
-            ax.scatter(e_q[0, j], e_dq[0, j], c='green', marker='o', s=100, zorder=5, label='Start' if i == 0 else "_nolegend_")
-            ax.scatter(e_q[-1, j], e_dq[-1, j], c='black', marker='*', s=150, zorder=5, label='End Target' if i == 0 else "_nolegend_")
+            if e_q is not None:
+                e_dq = np.gradient(e_q, dt, axis=0)
+                e_dq[0] = 0.0   # np.gradient is inaccurate for t=0. Maniskill resets agent to zero velocity! 
+                label = 'Motion Planner (Expert)' if i == 0 else "_nolegend_"
+                ax.plot(e_q[:, j], e_dq[:, j], color='black', linewidth=2, label=label)
+                # Mark start and end targets
+                ax.scatter(e_q[0, j], e_dq[0, j], c='green', marker='o', s=100, zorder=5, label='Start' if i == 0 else "_nolegend_")
+                ax.scatter(e_q[-1, j], e_dq[-1, j], c='black', marker='*', s=150, zorder=5, label='End Target' if i == 0 else "_nolegend_")
 
         ax.set_title(f"Joint {j}")
         ax.set_ylabel("Velocity [rad/s]")
@@ -307,6 +333,90 @@ def save_phase_corridor_plot(
         if j == num_joints - 1: ax.set_xlabel("Position [rad]")
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.98])
+    plt.savefig(save_path, dpi=300)
+    plt.close(fig)
+
+
+def save_joint_pos_over_time_plot(
+    expert_trajectories: list, 
+    policy_trajectories: list, 
+    save_path: str
+):
+    """ Generates the Position vs Timestep Plot for all joints."""
+    if len(policy_trajectories) == 0:
+        return None
+
+    # Get num joints from the first trajectory
+    if len(expert_trajectories) > 0 and expert_trajectories[0] is not None:
+        num_joints = expert_trajectories[0].shape[1]
+    else:
+        num_joints = policy_trajectories[0].shape[1]
+    
+    fig, axes = plt.subplots(nrows=num_joints, ncols=1, figsize=(10, 3 * num_joints))
+    if num_joints == 1: axes = [axes]
+    fig.suptitle("Joint Position over Time: Policy vs. Ground Truth", fontsize=16, fontweight='bold')
+    
+    for j in range(num_joints):
+        ax = axes[j]
+        
+        # Plot all Policy Rollouts (Thin, translucent red)
+        for i, p_q in enumerate(policy_trajectories):
+            time_axis = np.arange(len(p_q))
+            label = 'Policy Rollout' if i == 0 else "_nolegend_"
+            ax.plot(time_axis, p_q[:, j], color='red', alpha=0.3, linewidth=1.0, label=label)
+
+        # Plot all Expert Ground Truths (Thick, black)
+        for i, e_q in enumerate(expert_trajectories):
+            if e_q is not None:
+                time_axis = np.arange(len(e_q))
+                label = 'Motion Planner (Expert)' if i == 0 else "_nolegend_"
+                ax.plot(time_axis, e_q[:, j], color='black', linewidth=2, label=label)
+
+        ax.set_title(f"Joint {j}")
+        ax.set_ylabel("Position [rad]")
+        ax.grid(True, alpha=0.3)
+        if j == 0: ax.legend(loc='upper right')
+        if j == num_joints - 1: ax.set_xlabel("Timestep")
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.98])
+    plt.savefig(save_path, dpi=300)
+    plt.close(fig)
+
+
+def save_num_unique_gaussians_plot(
+    all_num_unique_gaussians: list,
+    save_path: str
+):
+    """ Plots median, 25%, and 75% quantile of num unique Gaussians over time. """
+    if len(all_num_unique_gaussians) == 0:
+        return None
+        
+    # Find max length
+    max_len = max(len(traj) for traj in all_num_unique_gaussians)
+    
+    # Pad with NaN
+    padded_data = np.full((len(all_num_unique_gaussians), max_len), np.nan)
+    for i, traj in enumerate(all_num_unique_gaussians):
+        padded_data[i, :len(traj)] = traj
+        
+    # Calculate quantiles ignoring NaNs
+    q25 = np.nanpercentile(padded_data, 25, axis=0)
+    q50 = np.nanpercentile(padded_data, 50, axis=0) # median
+    q75 = np.nanpercentile(padded_data, 75, axis=0)
+    
+    time_axis = np.arange(max_len)
+    
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(time_axis, q50, color='blue', linewidth=2, label='Median Unique Gaussians')
+    ax.fill_between(time_axis, q25, q75, color='blue', alpha=0.2, label='25%-75% Quantile')
+    
+    ax.set_title("Unique Selected Gaussians over Time", fontsize=14, fontweight='bold')
+    ax.set_xlabel("Timestep")
+    ax.set_ylabel("Number of Unique Gaussians")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='upper right')
+    
+    plt.tight_layout()
     plt.savefig(save_path, dpi=300)
     plt.close(fig)
 
