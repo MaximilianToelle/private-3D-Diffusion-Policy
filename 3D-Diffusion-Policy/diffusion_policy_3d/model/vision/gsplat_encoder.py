@@ -214,6 +214,11 @@ class GSplatDP3Encoder(nn.Module):
         for k, v in gs_data_dict.items():
             assert len(v.shape) == 3, f"Key '{k}' has shape {v.shape}, expected (B, N, C)"
 
+        # Sort log scales to: [log_s_max, log_s_min, log_s_surface_normal]
+        # NOTE: Only works because normalization stats are computed over all log scales, ie the distinct ordering of value magnitudes remains
+        if 'gs_log_scales' in gs_data_dict:
+            gs_data_dict['gs_log_scales'], _ = torch.sort(gs_data_dict['gs_log_scales'], dim=-1, descending=True, stable=True)
+
         gs_feat = self.extractor(gs_data_dict)  # (B, out_channel)
 
         # ── State features ───────────────────────────────────────────────────
