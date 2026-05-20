@@ -104,7 +104,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
         all_policy_trajectories = []
         all_num_unique_gaussians = []
 
-        for episode_idx in tqdm.tqdm(range(2), desc=f"Eval ManiSkill {self.task_name}", leave=False, mininterval=self.tqdm_interval_sec):
+        for episode_idx in tqdm.tqdm(range(self.eval_episodes), desc=f"Eval ManiSkill {self.task_name}", leave=False, mininterval=self.tqdm_interval_sec):
             
             init_state = None
             expert_q_sequence = None
