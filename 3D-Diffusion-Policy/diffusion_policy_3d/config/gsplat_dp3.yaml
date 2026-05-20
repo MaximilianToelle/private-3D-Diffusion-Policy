@@ -12,14 +12,24 @@ policy:
 
   # Gaussian Splatting parameters
   gsplat_encoder_cfg:
+    encoder_type: raw_concat               # Options: latent_concat, raw_concat
+    
+    # ── Config for latent_concat (projection mlps for params) ──
     param_keys_feature_dims: # defines which param groups to encode to which feature dim 
       gs_positions: 64         
-      gs_rotations_9d: 0       # 64
+      gs_rotations_9d: 0       # 0 disables (previously 64)
       gs_surface_normals: 32    
       gs_log_scales: 32         
       gs_opacities: 16          
       gs_rgb: 32                
-    backbone_channels: [256, 512, 1024]  # [512, 512], [256, 512]  # mixing layer after cat + expansion till global max-pool 
+
+    # ── Config for raw_concat (which parameters to use) ──
+    raw_keys:         
+      - gs_positions
+      - gs_surface_normals
+      - gs_log_scales
+
+    backbone_channels: [256, 512, 1024]     # in DP3 with XYZRGB-Encoder [64, 128, 256, 512]
     use_layernorm: true                     # in backbone
     use_projection: true                    # projection to out_channels
     final_norm: layernorm                   # within projection

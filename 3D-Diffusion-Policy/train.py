@@ -214,18 +214,20 @@ class TrainDP3Workspace:
                     if self.cfg.policy._target_ == "diffusion_policy_3d.policy.gsplat_dp3.GSplatDP3":
                         # === For logging: Extract Gradient Norms and Feature Magnitudes === 
                         extractor = self.model.obs_encoder.extractor
-                        # 1. Retrieve the feature magnitudes saved during the forward pass
-                        diagnostic_metrics = copy.deepcopy(extractor._latest_feature_magnitudes)
-                        # 2. Extract gradient norms for the last linear layer of each shallow MLP
-                        for key in extractor.ordered_keys:
-                            # param_groups[key] is a Sequential(Linear, LayerNorm, Mish, Linear)
-                            # Index 3 is the final nn.Linear layer before concatenation
-                            last_linear_layer = extractor.param_groups[key][3]
-                            
-                            if last_linear_layer.weight.grad is not None:
-                                # Compute L2 norm of the gradient tensor
-                                grad_norm = last_linear_layer.weight.grad.norm().item()
-                                diagnostic_metrics[f'grad_norm/{key}'] = grad_norm
+                        # 1. Retrieve the feature magnitudes saved during the forward pass (if present)
+                        if hasattr(extractor, '_latest_feature_magnitudes'):
+                            diagnostic_metrics = copy.deepcopy(extractor._latest_feature_magnitudes)
+                        # 2. Extract gradient norms for the last linear layer of each shallow MLP (if present)
+                        if hasattr(extractor, 'param_groups'):
+                            for key in extractor.ordered_keys:
+                                # param_groups[key] is a Sequential(Linear, LayerNorm, Mish, Linear)
+                                # Index 3 is the final nn.Linear layer before concatenation
+                                last_linear_layer = extractor.param_groups[key][3]
+                                
+                                if last_linear_layer.weight.grad is not None:
+                                    # Compute L2 norm of the gradient tensor
+                                    grad_norm = last_linear_layer.weight.grad.norm().item()
+                                    diagnostic_metrics[f'grad_norm/{key}'] = grad_norm
 
                     # step optimizer
                     if self.global_step % cfg.training.gradient_accumulate_every == 0:

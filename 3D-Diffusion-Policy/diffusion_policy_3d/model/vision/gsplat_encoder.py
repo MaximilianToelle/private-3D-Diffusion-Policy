@@ -25,15 +25,15 @@ def _shallow_mlp(in_dim: int, out_dim: int, activation: Type[nn.Module] = nn.Mis
     )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Scene Encoder
+# Latent Concat Scene Encoder (Separate MLP projections before concatenation)
 # ──────────────────────────────────────────────────────────────────────────────
 
-class GSplatSceneEncoder(nn.Module):
+class GSplatLatentConcatSceneEncoder(nn.Module):
     """Encodes individual Gaussian parameters with separate shallow MLPs,
-    concatenates them, mixes them into a unified feature, and applies a 
-    global max-pool to yield a unified scene-level feature vector. 
+    concatenates them in latent space, mixes them into a unified feature, 
+    and applies a global max-pool to yield a unified scene-level feature vector. 
 
-    PointNet logic with separate Gaussian param group encoder! 
+    GS params live in different spaces (ie R3, SO3...) which requires separate encoding before mixing.
     """
 
     def __init__(
@@ -50,8 +50,8 @@ class GSplatSceneEncoder(nn.Module):
     ):
         super().__init__()
 
-        cprint(f"[GSplatSceneEncoder] param_groups and feature_dim={param_keys_feature_dims}", "cyan")
-        cprint(f"[GSplatSceneEncoder] use_layernorm={use_layernorm}  final_norm={final_norm}", "cyan")
+        cprint(f"[GSplatLatentConcatSceneEncoder] param_groups and feature_dim={param_keys_feature_dims}", "cyan")
+        cprint(f"[GSplatLatentConcatSceneEncoder] use_layernorm={use_layernorm}  final_norm={final_norm}", "cyan")
         
         # ── 1. Per-parameter group MLPs (Dynamic mapping) ───────────────────
         self.param_groups = nn.ModuleDict()
@@ -106,7 +106,7 @@ class GSplatSceneEncoder(nn.Module):
                 raise NotImplementedError(f"final_norm: {final_norm}")
         else:
             self.final_projection = nn.Identity()
-            cprint("[GSplatSceneEncoder] not using final projection", "yellow")
+            cprint("[GSplatLatentConcatSceneEncoder] not using final projection", "yellow")
 
         # Logging
         self._latest_pool_indices = None
@@ -126,7 +126,6 @@ class GSplatSceneEncoder(nn.Module):
             group_outs.append(out)
 
             # Compute mean L2 norm across the feature dimension (dim=-1)
-            # This scalar value tells us the magnitude of this specific encoder's output
             mag = out.norm(dim=-1).mean().item()
             self._latest_feature_magnitudes[f'feature_mag/{key}'] = mag
 
@@ -144,6 +143,104 @@ class GSplatSceneEncoder(nn.Module):
 
         return global_feat
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Raw Concat Scene Encoder (PointNet Style - Direct raw concatenation)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class GSplatRawConcatSceneEncoder(nn.Module):
+    """Concatenates selected raw Gaussian parameters into a single vector,
+    and then feeds it through a shared backbone MLP before applying global max-pool.
+
+    PointNet style: Allows arbitrary cross-attribute correlations at the first layer.
+    NOTE: Only valid for concatenating parameters which live in the same space! 
+    """
+
+    def __init__(
+        self,
+        observation_space: Dict,          # Passed dynamically from the wrapper
+        raw_keys: List[str],              # List of parameters to concatenate raw
+        backbone_channels: List,
+        out_channels: int = 64,                 # final global feature dim
+        use_layernorm: bool = True,
+        final_norm: str = "layernorm",
+        use_projection: bool = True,
+        activation_fn: Type[nn.Module] = nn.Mish,
+        **kwargs,                         # absorb extra config gracefully
+    ):
+        super().__init__()
+
+        self.ordered_keys = []
+        in_dim = 0
+        for key in raw_keys:
+            if key in observation_space:
+                self.ordered_keys.append(key)
+                in_dim += observation_space[key][-1]
+            else:
+                raise ValueError(f"Expected raw key '{key}' not found in observation_space!")
+
+        cprint(f"[GSplatRawConcatSceneEncoder] ordered_keys={self.ordered_keys} input_dim={in_dim}", "cyan")
+        cprint(f"[GSplatRawConcatSceneEncoder] backbone_channels={backbone_channels} use_layernorm={use_layernorm}  final_norm={final_norm}", "cyan")
+
+        # ── 1. Gsplat Feature Backbone ──────────────────────────────────────
+        layers = []
+        current_in_dim = in_dim
+        assert backbone_channels[0] >= current_in_dim, "Mixing Layer is smaller than concatenated feature vectors"
+
+        # Dynamically build the backbone to support any depth
+        for out_dim in backbone_channels:
+            layers.append(nn.Linear(current_in_dim, out_dim))
+            if use_layernorm:
+                layers.append(nn.LayerNorm(out_dim))
+            layers.append(activation_fn())
+            current_in_dim = out_dim
+        
+        # NOTE: We do LayerNorm and Activation before Max Pooling, not done in PointNetEncoder of DP3!
+        self.gsplat_feature_backbone = nn.Sequential(*layers)
+
+        # ── 2. Final projection (after global max-pool) ─────────────────────
+        if use_projection:
+            if final_norm == "layernorm":
+                self.final_projection = nn.Sequential(
+                    nn.Linear(backbone_channels[-1], out_channels),
+                    nn.LayerNorm(out_channels),
+                )
+            elif final_norm == "none":
+                self.final_projection = nn.Linear(backbone_channels[-1], out_channels)
+            else:
+                raise NotImplementedError(f"final_norm: {final_norm}")
+        else:
+            self.final_projection = nn.Identity()
+            cprint("[GSplatRawConcatSceneEncoder] not using final projection", "yellow")
+
+        # Logging
+        self._latest_pool_indices = None
+
+    def forward(self, gs_data_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Args:
+            gs_data_dict: Dictionary mapping "gs_*" keys to (B, N, C) data tensors.
+        Returns:
+            (B, out_channels) global feature vector
+        """
+        # 1. Concatenate raw features along channel dimension
+        raw_features = [gs_data_dict[key] for key in self.ordered_keys]
+        merged = torch.cat(raw_features, dim=-1)  # (B, N, in_dim)
+        
+        # 3. Gsplat Feature Backbone (mixing features and expanding)
+        features = self.gsplat_feature_backbone(merged)       # (B, N, backbone[-1])
+
+        # 4. Global max-pool over Gaussians
+        global_feat, self._latest_pool_indices = torch.max(features, dim=1)           # (B, backbone[-1])
+
+        # 5. Final projection
+        global_feat = self.final_projection(global_feat)      # (B, out_channels)
+
+        return global_feat
+
+
+# Legacy fallback alias for backward compatibility with older checkpoint loading
+GSplatSceneEncoder = GSplatLatentConcatSceneEncoder
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Top-level encoder (drop-in replacement for DP3Encoder)
@@ -183,11 +280,25 @@ class GSplatDP3Encoder(nn.Module):
         gsplat_encoder_cfg = dict(gsplat_encoder_cfg) if gsplat_encoder_cfg else {}
         self.use_state_features = use_state_features
         
-        # Pass the extracted GS space downward so the inner MLP can build dynamic inputs based on gsplat_encoder_cfg
-        self.extractor = GSplatSceneEncoder(
-            observation_space=self.gs_obs_space,
-            **gsplat_encoder_cfg
-        )
+        # Select encoder type: 'latent_concat' (default) or 'raw_concat'
+        encoder_type = gsplat_encoder_cfg.pop("encoder_type", "latent_concat")
+        
+        if encoder_type == "latent_concat":
+            # Remove raw_keys if present to avoid passing it to latent concat constructor
+            gsplat_encoder_cfg.pop("raw_keys", None)
+            self.extractor = GSplatLatentConcatSceneEncoder(
+                observation_space=self.gs_obs_space,
+                **gsplat_encoder_cfg
+            )
+        elif encoder_type == "raw_concat":
+            # Remove param_keys_feature_dims if present to avoid passing it to raw concat constructor
+            gsplat_encoder_cfg.pop("param_keys_feature_dims", None)
+            self.extractor = GSplatRawConcatSceneEncoder(
+                observation_space=self.gs_obs_space,
+                **gsplat_encoder_cfg
+            )
+        else:
+            raise ValueError(f"Unknown encoder_type: {encoder_type}")
 
         # ── State MLP (same as DP3Encoder) ───────────────────────────────────
         if len(state_mlp_size) == 0:
