@@ -7,8 +7,6 @@ from gsworld.mani_skill.utils.gsplat_viewer.utils_rasterize_render import _viewe
 
 from pytorch3d.ops import sample_farthest_points
 
-from diffusion_policy_3d.common.gs_util import compute_gs_normals
-
 
 class WristCamGSManiskillDP3Wrapper(gym.Env):
     """
@@ -37,6 +35,8 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
             shape=orig_as.shape,
             dtype=orig_as.dtype
         )
+
+        self.prev_active_mask = None
 
         obs, _ = self.env.reset()
         dummy_state = self._extract_state(obs)
@@ -93,8 +93,20 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
         state = self._extract_state(obs)
         obs_dict["agent_pos"] = state
 
-        gsplats = obs['sensor_data']['gsplats'][0, :, :-1]
-        
+        gsplats = obs['sensor_data']['gsplats'][0, ...]
+        N_total = gsplats.shape[0]
+
+        # --- Track newly-active Gaussians ---
+        active_gaussians_mask = obs['sensor_data']['gsplats'][0, :, 19].to(torch.bool)
+
+        if self.prev_active_mask is None:
+            # t=0: all currently active Gaussians are newly active
+            newly_active_mask = active_gaussians_mask
+        else:
+            # t>0: newly active = active now AND NOT active last step
+            newly_active_mask = active_gaussians_mask & ~self.prev_active_mask
+        self.prev_active_mask = active_gaussians_mask  # update for next step
+
         # NOTE: Policy outputs self.n_action_steps based on the last self.n_obs_steps
         # Example: For the init default values, the policy receives obs from timestep (0, 0), (7, 8), (15, 16), (23, 24) ...
         # so we need to resample at 0, 7, 15, 23, ... to benefit from the gsplat consistency property over time
@@ -102,7 +114,6 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
             assert obs['sensor_data']['gsplats'].shape[0] == 1, "Sampling needs modification to work for batched environments!"
             
             # Extracting all active Gaussians in current timestep and doing farthest point sampling on top
-            active_gaussians_mask = obs['sensor_data']['gsplats'][0, :, -1].to(torch.bool)
             active_indices_global = torch.where(active_gaussians_mask)[0]
 
             active_pts_xyz = gsplats[active_indices_global, :3].unsqueeze(0)
@@ -112,10 +123,10 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
         obs_dict["gs_positions"] = gsplats[self.gaussian_indices, :3]
         obs_dict["gs_rotations_9d"] = gsplats[self.gaussian_indices, 3:12]
         obs_dict["gs_log_scales"] = gsplats[self.gaussian_indices, 12:15]
-        obs_dict["gs_surface_normals"] = compute_gs_normals(obs_dict["gs_rotations_9d"], obs_dict["gs_log_scales"])
         obs_dict["gs_opacities"] = gsplats[self.gaussian_indices, 15:16]
         obs_dict["gs_rgb"] = gsplats[self.gaussian_indices, 16:19]
-
+        obs_dict["gs_surface_normals"] = gsplats[self.gaussian_indices, 20:23]
+         
         # Save RGB for rendering
         rgb = obs['sensor_data']['wrist_cam']['rgb'].squeeze(0)
         self._last_rgb = rgb.clone().to(torch.uint8)
@@ -154,7 +165,8 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
         obs, info = self.env.reset(**kwargs)
 
         self.gaussian_indices = None
-
+        self.prev_active_mask = None   
+        
         obs_dict = self._get_obs_dict(obs, info['elapsed_steps'].item())
 
         return obs_dict

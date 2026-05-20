@@ -23,8 +23,9 @@ from mani_skill.utils.structs.pose import Pose
 
 class GSTransform:
     """
-    Utility class to transform the 14-channel 3D Gaussian Splatting representation
-    to robot `qpos` and `actor_poses`.
+    Utility class to transform the 17-channel 3D Gaussian Splatting representation
+    (xyz, rotation, scale, opacity, color, and surface normals) to robot `qpos` 
+    and `actor_poses`.
     """
     def __init__(
         self, 
@@ -226,7 +227,7 @@ class GSTransform:
         final_scale = batch_scale[self._all_object_id_ordered_indices_to_object_ids] # (N,)
         
         # 3. Apply Transformation to all active Gaussians
-        gs_xyz, gs_scaling, gs_rotation, gs_opacity = transform_gaussians(
+        gs_xyz, gs_scaling, gs_rotation, gs_opacity, gs_surf_normals = transform_gaussians(
             self.init_gs_scene_model,
             selected_indices=self._all_object_id_ordered_gs_scene_indices,
             scale=final_scale,
@@ -244,7 +245,8 @@ class GSTransform:
             "quaternions": gs_rotation,     
             "log_scales": gs_scaling,       
             "logit_opacities": opacity,     
-            "features_dc": f_dc,                    
+            "features_dc": f_dc,
+            "surface_normals": gs_surf_normals,                   
         }
         
         return gsplats
@@ -326,7 +328,7 @@ class GSTransform:
         final_scale = batch_scale[:, self._all_object_id_ordered_indices_to_object_ids] # (T_seq, N)
         
         # Fully batched transform over sequence length 
-        gs_xyz, gs_scaling, gs_rotation, gs_opacity = transform_batched_gaussians(
+        gs_xyz, gs_scaling, gs_rotation, gs_opacity, gs_surf_normals = transform_batched_gaussians(
             self.init_gs_scene_model,
             selected_indices=self._all_object_id_ordered_gs_scene_indices,
             scale=final_scale,
@@ -345,5 +347,6 @@ class GSTransform:
             "quaternions": gs_rotation,     
             "log_scales": gs_scaling,       
             "logit_opacities": opacity,     
-            "features_dc": f_dc,                    
+            "features_dc": f_dc,
+            "surface_normals": gs_surf_normals,                   
         }

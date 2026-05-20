@@ -13,7 +13,7 @@ shape_meta: &shape_meta
         - ${task.num_gaussians}
         - 3
       type: spatial
-    point_cloud:  # for running dp3 on gsplat means
+    point_cloud:          # for running dp3 on gsplat means
       shape: 
         - ${task.num_gaussians}
         - 3
@@ -49,6 +49,7 @@ env_runner:
   task_name: StackFr3Env-v1
   num_gaussians: ${task.num_gaussians}
   use_gsplat_viewer: false
+  scene_gs_cfg_name: "fr3_stack_with_normals"
 
 dataset:
   _target_: diffusion_policy_3d.dataset.maniskill_gs_dataset.GSManiskillDataset

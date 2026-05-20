@@ -12,7 +12,6 @@ from diffusion_policy_3d.model.common.normalizer import LinearNormalizer, Single
 from diffusion_policy_3d.dataset.base_dataset import BaseDataset
 
 from pytorch3d.ops import sample_farthest_points
-from diffusion_policy_3d.common.gs_util import compute_gs_normals
 
 
 class WristCamGSManiskillDataset(BaseDataset):
@@ -327,8 +326,8 @@ class WristCamGSManiskillDataset(BaseDataset):
         if not skip_subsampling:
             # Filter out non-active Gaussians at init timestep of sample
             # NOTE: Gaussians becoming active later don't matter as we do not consider them in farthest point sampling
-            active_gaussians_mask = gsplats[0, :, -1].to(torch.bool)
-            active_gsplats= gsplats[:, active_gaussians_mask, :-1]
+            active_gaussians_mask = gsplats[0, :, 19].to(torch.bool)
+            active_gsplats= gsplats[:, active_gaussians_mask, :]
 
             T, N, D = active_gsplats.shape
         
@@ -354,7 +353,7 @@ class WristCamGSManiskillDataset(BaseDataset):
                 'gs_positions': gsplats[..., :3],
                 'point_cloud': gsplats[..., :3],
                 'gs_rotations_9d': gsplats[..., 3:12],
-                'gs_surface_normals': compute_gs_normals(gsplats[..., 3:12], gsplats[..., 12:15]),
+                'gs_surface_normals': gsplats[..., 20:],
                 'gs_log_scales': gsplats[..., 12:15],
                 'gs_opacities': gsplats[..., 15:16],
                 'gs_rgb': gsplats[..., 16:19],

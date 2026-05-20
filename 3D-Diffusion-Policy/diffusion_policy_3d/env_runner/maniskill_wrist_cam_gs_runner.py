@@ -44,6 +44,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
                  device="cuda:0",
                  num_gaussians=1024,
                  use_gsplat_viewer=False,
+                 scene_gs_cfg_name="fr3_stack",
                  ):
         super().__init__(output_dir)
         self.task_name = task_name
@@ -63,11 +64,10 @@ class WristCamGSManiSkillRunner(BaseRunner):
             
             parser = argparse.ArgumentParser()
             robot_pipe = PipelineParams(parser)
-            # Hardcoded GS cfg based on dataset scripts (can be parameterized in yaml)
             mapped_env = WristCamGSWorldWrapper(
                 base_env, 
                 robot_pipe, 
-                scene_gs_cfg_name="fr3_stack", 
+                scene_gs_cfg_name=scene_gs_cfg_name, 
                 device=device, 
                 use_gsplat_viewer=use_gsplat_viewer
             )
@@ -154,7 +154,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
                     obs_dict_input['gs_positions'] = obs_dict['gs_positions'].unsqueeze(0)
                     obs_dict_input['point_cloud'] = obs_dict['gs_positions'].unsqueeze(0)
                     obs_dict_input['gs_rotations_9d'] = obs_dict['gs_rotations_9d'].unsqueeze(0)
-                    # obs_dict_input['gs_surface_normals'] = obs_dict['gs_surface_normals'].unsqueeze(0)
+                    obs_dict_input['gs_surface_normals'] = obs_dict['gs_surface_normals'].unsqueeze(0)
                     obs_dict_input['gs_log_scales'] = obs_dict['gs_log_scales'].unsqueeze(0)
                     obs_dict_input['gs_opacities'] = obs_dict['gs_opacities'].unsqueeze(0)
                     obs_dict_input['gs_rgb'] = obs_dict['gs_rgb'].unsqueeze(0)

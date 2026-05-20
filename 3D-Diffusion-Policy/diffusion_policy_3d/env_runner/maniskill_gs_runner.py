@@ -37,6 +37,7 @@ class GSManiSkillRunner(BaseRunner):
                  device="cuda:0",
                  num_gaussians=1024,
                  use_gsplat_viewer=False,
+                 scene_gs_cfg_name="fr3_stack",
                  ):
         super().__init__(output_dir)
         self.task_name = task_name
@@ -56,8 +57,7 @@ class GSManiSkillRunner(BaseRunner):
             
             parser = argparse.ArgumentParser()
             robot_pipe = PipelineParams(parser)
-            # Hardcoded GS cfg based on dataset scripts (can be parameterized in yaml)
-            mapped_env = GSWorldWrapper(base_env, robot_pipe, scene_gs_cfg_name="fr3_stack", device=device)
+            mapped_env = GSWorldWrapper(base_env, robot_pipe, scene_gs_cfg_name=scene_gs_cfg_name, device=device)
             
             return MultiStepWrapper(
                 SimpleVideoRecordingWrapper(
