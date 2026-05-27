@@ -13,9 +13,7 @@ import torch
 import dill
 from omegaconf import OmegaConf
 import pathlib
-import re
 from torch.utils.data import DataLoader
-from pytorch3d.ops import sample_farthest_points
 import copy
 import random
 import wandb
@@ -28,12 +26,13 @@ from hydra.core.hydra_config import HydraConfig
 from diffusion_policy_3d.policy.dp3 import DP3
 from diffusion_policy_3d.policy.gsplat_dp3 import GSplatDP3
 from diffusion_policy_3d.dataset.base_dataset import BaseDataset
-from diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_dataset import WristCamGSManiskillDataset
+from diffusion_policy_3d.dataset.data_augmentations import GaussianCompose
 from diffusion_policy_3d.env_runner.base_runner import BaseRunner
 from diffusion_policy_3d.common.checkpoint_util import TopKCheckpointManager
 from diffusion_policy_3d.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy_3d.model.diffusion.ema_model import EMAModel
 from diffusion_policy_3d.model.common.lr_scheduler import get_scheduler
+
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
@@ -105,7 +104,6 @@ class TrainDP3Workspace:
         # configure dataset
         dataset: BaseDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
-
         assert isinstance(dataset, BaseDataset), print(f"dataset must be BaseDataset, got {type(dataset)}")
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         normalizer = dataset.get_normalizer()
@@ -113,6 +111,20 @@ class TrainDP3Workspace:
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
+
+        # configure GPU augmentations
+        if 'train_augmentations' in cfg.task and cfg.task.train_augmentations is not None:
+            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.train_augmentations]
+            self.train_augmentations = GaussianCompose(augmentations)
+        else:
+            raise ValueError("Train data augmentations must be explicitly provided in the dataset config!")
+            
+        if 'eval_augmentations' in cfg.task and cfg.task.eval_augmentations is not None:
+            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.eval_augmentations]
+            self.eval_augmentations = GaussianCompose(augmentations)
+        else:
+            raise ValueError("Eval data augmentations must be explicitly provided in the dataset config!")
+
 
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
@@ -194,10 +206,7 @@ class TrainDP3Workspace:
                     t1 = time.time()
                     # device transfer
                     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                    
-                    if isinstance(dataset, WristCamGSManiskillDataset):
-                        # NOTE: FPS on CPU for each sample during batch generation is too slow
-                        batch = batched_gpu_fps(batch, num_samples=self.cfg.task.dataset.num_gaussians)
+                    batch = self.train_augmentations(batch)
 
                     if train_sampling_batch is None:
                         train_sampling_batch = batch
@@ -305,9 +314,7 @@ class TrainDP3Workspace:
                             leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                         for batch_idx, batch in enumerate(tepoch):
                             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                            if isinstance(dataset, WristCamGSManiskillDataset):
-                                # NOTE: FPS on CPU for each sample during batch generation is too slow
-                                batch = batched_gpu_fps(batch, num_samples=self.num_gaussians)
+                            batch = self.eval_augmentations(batch)
                             
                             loss, loss_dict = self.model.compute_loss(batch)
 
@@ -541,39 +548,6 @@ class TrainDP3Workspace:
     @classmethod
     def create_from_snapshot(cls, path):
         return torch.load(open(path, 'rb'), pickle_module=dill)
-
-
-def batched_gpu_fps(batch, num_samples=1024):
-    obs = batch['obs']
-    B, T, N, _ = obs['gs_positions'].shape
-    
-    # Grab t=0 positions and the lengths tensor
-    points_t0 = obs['gs_positions'][:, 0, :, :].to(torch.float32)
-    lengths = obs['gs_length']          # Shape: (B,)
-    del batch['obs']['gs_length']       # not needed afterwards
-    
-    # Batched GPU FPS with strict boundary enforcement
-    # The CUDA kernel will mathematically ignore any index >= lengths[i]
-    _, sampled_indices = sample_farthest_points(
-        points_t0, 
-        lengths=lengths, 
-        K=num_samples
-    )
-    
-    keys_to_subsample = [k for k in obs.keys() if k not in ['agent_pos', 'gs_length']]
-        
-    # Apply indices across all features and time steps
-    for key in keys_to_subsample:
-        tensor = obs[key]       # (B, T, 32768, D)
-        D = tensor.shape[-1]
-        
-        # Expand indices from (B, 1024) to (B, T, 1024, D)
-        gather_idx = sampled_indices.view(B, 1, num_samples, 1).expand(-1, T, -1, D)
-        
-        # Subsample to final target size
-        obs[key] = torch.gather(tensor, dim=2, index=gather_idx).to(torch.float32)
-        
-    return batch
 
 
 @hydra.main(

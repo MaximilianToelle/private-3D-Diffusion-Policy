@@ -11,3 +11,6 @@ env_runner:
 
 dataset:
   zarr_path: /home/max/projects/gsplat_policy/datasets/3d_diffusion_policy/stack_wrist_cam
+
+train_augmentations: []
+eval_augmentations: []
