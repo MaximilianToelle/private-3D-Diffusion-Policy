@@ -18,8 +18,9 @@ class GaussianFPS:
     Standard Farthest Point Sampling on the GPU.
     Used for evaluation and baseline models to reduce the number of Gaussians.
     """
-    def __init__(self, num_samples=1024):
+    def __init__(self, num_samples=1024, random_start_point=False):
         self.num_samples = num_samples
+        self.random_start_point = random_start_point
 
     def __call__(self, batch):
         obs = batch['obs']
@@ -35,7 +36,8 @@ class GaussianFPS:
         _, sampled_indices = sample_farthest_points(
             points_t0, 
             lengths=lengths, 
-            K=self.num_samples
+            K=self.num_samples,
+            random_start_point=self.random_start_point
         )
         
         keys_to_subsample = [k for k in obs.keys() if k not in ['agent_pos', 'gs_length']]
@@ -59,8 +61,9 @@ class GaussianFPSAndBallQuery:
     Augmentation that runs FPS, then for each centroid, randomly selects
     one neighboring Gaussian within a specified radius using a ball query.
     """
-    def __init__(self, num_samples=1024, radius=0.02, max_neighbors=16):
+    def __init__(self, num_samples=1024, random_start_point=False, radius=0.02, max_neighbors=16):
         self.num_samples = num_samples
+        self.random_start_point = random_start_point
         self.radius = radius
         self.max_neighbors = max_neighbors
 
@@ -78,7 +81,8 @@ class GaussianFPSAndBallQuery:
         _, centroid_idx = sample_farthest_points(
             points_t0, 
             lengths=lengths, 
-            K=self.num_samples
+            K=self.num_samples,
+            random_start_point=self.random_start_point
         )
         
         # Extract the centroid coordinates

@@ -15,9 +15,11 @@ dataset:
 train_augmentations:
   - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianFPSAndBallQuery
     num_samples: ${task.dataset.num_gaussians}
+    random_start_point: True
     radius: 0.02
     max_neighbors: 16
 
 eval_augmentations:
   - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianFPS
     num_samples: ${task.dataset.num_gaussians}
+    random_start_point: False
