@@ -10,14 +10,14 @@ env_runner:
 
 dataset:
   _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_dataset.WristCamGSManiskillDataset
-  zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_surface_normals
+  zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_surface_normals_semantics
 
 train_augmentations:
   - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianFPSAndBallQuery
     num_samples: ${task.dataset.num_gaussians}
     random_start_point: True
-    radius: 0.02
-    max_neighbors: 16
+    radius: 0.01
+    max_neighbors: 128
 
 eval_augmentations:
   - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianFPS

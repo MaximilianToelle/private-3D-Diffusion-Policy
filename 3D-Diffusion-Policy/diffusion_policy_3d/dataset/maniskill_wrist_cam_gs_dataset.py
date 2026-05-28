@@ -322,6 +322,7 @@ class WristCamGSManiskillDataset(BaseDataset):
         agent_pos = torch.from_numpy(sample['state'])
         action = torch.from_numpy(sample['action'])
         gsplats = torch.from_numpy(sample['gsplats'])
+        D = gsplats.shape[-1]
 
         if not skip_subsampling:
             # Filter out non-active Gaussians at init timestep of sample
@@ -348,19 +349,22 @@ class WristCamGSManiskillDataset(BaseDataset):
             # Failsafe if skip_subsampling is used
             valid_length = gsplats.shape[1]
 
+        obs_dict = {
+            'gs_positions': gsplats[..., :3],
+            'point_cloud': gsplats[..., :3],
+            'gs_rotations_9d': gsplats[..., 3:12],
+            'gs_log_scales': gsplats[..., 12:15],
+            'gs_opacities': gsplats[..., 15:16],
+            'gs_rgb': gsplats[..., 16:19],
+            'gs_surface_normals': gsplats[..., 20:23],
+            'gs_semantics': gsplats[..., 23:24],
+            # CRITICAL: Return valid length for fps sampling during training
+            'gs_length': torch.tensor(valid_length, dtype=torch.long), 
+            'agent_pos': agent_pos,
+        }
+
         data = {
-            'obs': {
-                'gs_positions': gsplats[..., :3],
-                'point_cloud': gsplats[..., :3],
-                'gs_rotations_9d': gsplats[..., 3:12],
-                'gs_surface_normals': gsplats[..., 20:],
-                'gs_log_scales': gsplats[..., 12:15],
-                'gs_opacities': gsplats[..., 15:16],
-                'gs_rgb': gsplats[..., 16:19],
-                # CRITICAL: Return valid length for fps sampling during training
-                'gs_length': torch.tensor(valid_length, dtype=torch.long), 
-                'agent_pos': agent_pos,
-            },
+            'obs': obs_dict,
             'action': action,
         }
         

@@ -78,6 +78,11 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
                 shape=(self.num_gaussians, 3), 
                 dtype='float32'
             ),
+            'gs_semantics': spaces.Box(
+                low=-float('inf'), high=float('inf'),
+                shape=(self.num_gaussians, 1),
+                dtype='float32'
+            ),
         })
         
     def _extract_state(self, obs):
@@ -126,6 +131,7 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
         obs_dict["gs_opacities"] = gsplats[self.gaussian_indices, 15:16]
         obs_dict["gs_rgb"] = gsplats[self.gaussian_indices, 16:19]
         obs_dict["gs_surface_normals"] = gsplats[self.gaussian_indices, 20:23]
+        obs_dict["gs_semantics"] = gsplats[self.gaussian_indices, 23:24]
          
         # Save RGB for rendering
         rgb = obs['sensor_data']['wrist_cam']['rgb'].squeeze(0)
