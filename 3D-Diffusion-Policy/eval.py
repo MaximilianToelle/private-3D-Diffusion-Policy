@@ -26,6 +26,10 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 )
 def main(cfg):
     checkpoint_tag = getattr(cfg.checkpoint, 'checkpoint_tag', 'latest')
+    
+    # Detect if we should use dataset by checking if dataset path was overridden
+    overrides = HydraConfig.get().overrides.task
+    use_dataset = any(o.startswith('task.dataset.zarr_path=') for o in overrides)
 
     # Resolve checkpoint path from Hydra output dir without constructing the full workspace
     output_dir = pathlib.Path(HydraConfig.get().runtime.output_dir)
@@ -36,9 +40,26 @@ def main(cfg):
     # Build workspace from the checkpoint's own config so the model architecture
     # always matches the trained weights (critical for ablations).
     workspace = TrainDP3Workspace.create_from_checkpoint(path=str(ckpt_path))
+    
+    if use_dataset:
+        workspace.cfg.task.dataset.zarr_path = cfg.task.dataset.zarr_path
+        
     # Override output_dir so eval artifacts go to the right place
     workspace._output_dir = str(output_dir)
-    workspace.eval(checkpoint_tag)
+    workspace.eval(checkpoint_tag, use_dataset=use_dataset)
+
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--use_dataset', type=str, default=None, help='Path to dataset for in-distribution evaluation')
+    args, unknown = parser.parse_known_args()
+    
+    # Reconstruct sys.argv for Hydra, removing the user-facing --use_dataset option
+    sys.argv = [sys.argv[0]] + unknown
+    
+    # If path is provided, append it as a native Hydra config override
+    if args.use_dataset is not None:
+        sys.argv.append(f'task.dataset.zarr_path={args.use_dataset}')
+        
     main()

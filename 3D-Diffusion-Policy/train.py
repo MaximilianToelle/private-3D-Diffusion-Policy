@@ -383,7 +383,7 @@ class TrainDP3Workspace:
             self.epoch += 1
             del step_log
 
-    def eval(self, checkpoint_tag):
+    def eval(self, checkpoint_tag, use_dataset=False):
         # load the latest checkpoint
         
         cfg = copy.deepcopy(self.cfg)
@@ -403,13 +403,19 @@ class TrainDP3Workspace:
             cfg.task.env_runner,
             output_dir=self.output_dir)
         assert isinstance(env_runner, BaseRunner)
+        
+        dataset = None
+        if use_dataset:
+            dataset = hydra.utils.instantiate(cfg.task.dataset)
+            assert isinstance(dataset, BaseDataset)
+
         policy = self.model
         if cfg.training.use_ema:
             policy = self.ema_model
         policy.eval()
         policy.cuda()
 
-        runner_log = env_runner.run(policy, prefix=f"test_epoch_{self.epoch}")
+        runner_log = env_runner.run(policy, prefix=f"test_epoch_{self.epoch}", dataset=dataset)
         
       
         cprint(f"---------------- Eval Results --------------", 'magenta')
