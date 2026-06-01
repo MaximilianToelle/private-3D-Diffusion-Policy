@@ -13,13 +13,17 @@ dataset:
   zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_surface_normals_semantics
 
 train_augmentations:
-  - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianFPSAndBallQuery
+  - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianRandomSample
     num_samples: ${task.dataset.num_gaussians}
-    random_start_point: True
-    radius: 0.01
-    max_neighbors: 128
+  # - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianFPSAndBallQuery
+  #   num_samples: ${task.dataset.num_gaussians}
+  #   random_start_point: True
+  #   radius: 0.01
+  #   max_neighbors: 128
 
 eval_augmentations:
-  - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianFPS
+  - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianRandomSample
     num_samples: ${task.dataset.num_gaussians}
-    random_start_point: False
+  # - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianFPS
+  #   num_samples: ${task.dataset.num_gaussians}
+  #   random_start_point: False

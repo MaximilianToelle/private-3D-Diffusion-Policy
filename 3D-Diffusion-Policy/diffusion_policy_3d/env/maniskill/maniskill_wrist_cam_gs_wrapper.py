@@ -115,15 +115,22 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
         # NOTE: Policy outputs self.n_action_steps based on the last self.n_obs_steps
         # Example: For the init default values, the policy receives obs from timestep (0, 0), (7, 8), (15, 16), (23, 24) ...
         # so we need to resample at 0, 7, 15, 23, ... to benefit from the gsplat consistency property over time
-        if step == 0 or (step + self.n_obs_steps - 1) % self.n_action_steps == 0:
+        if step == 0: #  or (step + self.n_obs_steps - 1) % self.n_action_steps == 0:
             assert obs['sensor_data']['gsplats'].shape[0] == 1, "Sampling needs modification to work for batched environments!"
             
             # Extracting all active Gaussians in current timestep and doing farthest point sampling on top
             active_indices_global = torch.where(active_gaussians_mask)[0]
 
-            active_pts_xyz = gsplats[active_indices_global, :3].unsqueeze(0)
-            _, sampled_indices_local = sample_farthest_points(active_pts_xyz, K=self.num_gaussians)
-            self.gaussian_indices = active_indices_global[sampled_indices_local.squeeze()]
+            # Random sampling WITHOUT replacement using topk on random values
+            N_active = active_indices_global.shape[0]
+            r = torch.rand(N_active, device=active_indices_global.device)
+            _, topk_local = torch.topk(r, self.num_gaussians, largest=False)
+            self.gaussian_indices = active_indices_global[topk_local]
+            
+            # # FPS sampling (commented out in favor of random sampling)
+            # active_pts_xyz = gsplats[active_indices_global, :3].unsqueeze(0)
+            # _, sampled_indices_local = sample_farthest_points(active_pts_xyz, K=self.num_gaussians)
+            # self.gaussian_indices = active_indices_global[sampled_indices_local.squeeze()]
         
         obs_dict["gs_positions"] = gsplats[self.gaussian_indices, :3]
         obs_dict["gs_rotations_9d"] = gsplats[self.gaussian_indices, 3:12]

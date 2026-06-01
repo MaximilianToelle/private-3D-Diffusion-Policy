@@ -57,6 +57,51 @@ class GaussianFPS:
         return batch
 
 
+class GaussianRandomSample:
+    """
+    Randomly samples num_samples Gaussians on the GPU for each sequence in a batch.
+    Ensures that only valid (non-padded) Gaussians are sampled using the lengths tensor (gs_length).
+    The sampled indices are applied consistently across all timesteps and features.
+    """
+    def __init__(self, num_samples=1024):
+        self.num_samples = num_samples
+
+    def __call__(self, batch):
+        obs = batch['obs']
+        B, T, N, _ = obs['gs_positions'].shape
+        device = obs['gs_positions'].device
+        
+        lengths = obs.get('gs_length', None)
+        if 'gs_length' in obs:
+            del batch['obs']['gs_length']
+
+        # Random sampling WITHOUT replacement using partial sort via topk
+        r = torch.rand(B, N, device=device)
+        
+        if lengths is not None:
+            # Push padded indices to the back so they are never selected
+            mask = torch.arange(N, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
+            r[mask] = 2.0  # any value > 1.0 ensures padded points lose to valid ones
+            
+        # topk(largest=False) returns K smallest values — i.e. K random valid indices
+        _, sampled_indices = torch.topk(r, self.num_samples, dim=1, largest=False)
+        
+        keys_to_subsample = [k for k in obs.keys() if k not in ['agent_pos', 'gs_length']]
+            
+        # Apply indices across all features and time steps
+        for key in keys_to_subsample:
+            tensor = obs[key]       # (B, T, N, D)
+            D = tensor.shape[-1]
+            
+            # Expand indices from (B, num_samples) to (B, T, num_samples, D)
+            gather_idx = sampled_indices.view(B, 1, self.num_samples, 1).expand(-1, T, -1, D)
+            
+            # Subsample to final target size
+            obs[key] = torch.gather(tensor, dim=2, index=gather_idx).to(torch.float32)
+            
+        return batch
+
+
 class GaussianFPSAndBallQuery:
     """
     Augmentation that runs FPS, then for each centroid, randomly selects
