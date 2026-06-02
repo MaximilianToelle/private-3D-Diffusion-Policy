@@ -18,16 +18,15 @@ policy:
     param_keys_feature_dims: # defines which param groups to encode to which feature dim 
       gs_positions: 64         
       gs_rotations_9d: 0       # 0 disables (previously 64)
-      gs_surface_normals: 32    
-      gs_log_scales: 32         
-      gs_opacities: 16          
-      gs_rgb: 32                
+      gs_surface_normals: 64    
+      gs_log_scales: 0         
+      gs_opacities: 0          
+      gs_rgb: 0                
 
     # ── Config for raw_concat (which parameters to use) ──
     raw_keys:         
       - gs_positions
       - gs_surface_normals
-      - gs_log_scales
 
     backbone_channels: [256, 512, 1024]     # in DP3 with XYZRGB-Encoder [64, 128, 256, 512]
     use_layernorm: true                     # in backbone
