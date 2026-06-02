@@ -102,6 +102,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
 
         all_expert_trajectories = []
         all_policy_trajectories = []
+        all_predicted_actions = []
         all_num_unique_gaussians = []
 
         for episode_idx in tqdm.tqdm(range(self.eval_episodes), desc=f"Eval ManiSkill {self.task_name}", leave=False, mininterval=self.tqdm_interval_sec):
@@ -136,15 +137,10 @@ class WristCamGSManiSkillRunner(BaseRunner):
             traj_reward = 0
             is_success = False
 
-            current_policy_q = []
+            current_predicted_actions = []
             current_num_unique_gaussians = []
 
             while not done:
-                current_pos = obs['agent_pos'].cpu().numpy()
-                if len(current_pos.shape) > 1:
-                    current_pos = current_pos[-1]
-                current_policy_q.append(current_pos)
-
                 obs_dict = dict_apply(dict(obs),
                                       lambda x: x.to(device=device) if isinstance(x, torch.Tensor)
                                       else torch.from_numpy(x).to(device=device))
@@ -181,6 +177,9 @@ class WristCamGSManiSkillRunner(BaseRunner):
                                           lambda x: x.detach())
                 action = action_dict['action'].squeeze(0)
 
+                # Log predicted action targets (what the policy wants the PD controller to reach)
+                current_predicted_actions.extend(action.cpu().numpy())
+
                 #start = time.time()
                 obs, reward, done, info = env.step(action)
                 #print(f"Env step took: {time.time() - start}") 
@@ -199,7 +198,8 @@ class WristCamGSManiSkillRunner(BaseRunner):
                     is_success = is_success or s
 
             all_expert_trajectories.append(expert_q_sequence)
-            all_policy_trajectories.append(np.array(current_policy_q))
+            all_policy_trajectories.append(torch.stack(list(env.traj_agent_pos)).cpu().numpy())
+            all_predicted_actions.append(np.array(current_predicted_actions))
             all_num_unique_gaussians.append(np.array(current_num_unique_gaussians))
 
             if is_success:
@@ -247,7 +247,8 @@ class WristCamGSManiSkillRunner(BaseRunner):
             
             save_joint_pos_over_time_plot(
                 all_expert_trajectories, 
-                all_policy_trajectories, 
+                all_policy_trajectories,
+                all_predicted_actions,
                 save_path=joint_pos_path
             )
             cprint(f"Saved Joint Position plot to {joint_pos_path}", "cyan")
@@ -339,10 +340,20 @@ def save_phase_corridor_plot(
 
 def save_joint_pos_over_time_plot(
     expert_trajectories: list, 
-    policy_trajectories: list, 
-    save_path: str
+    policy_trajectories: list,
+    predicted_actions: list = None,
+    save_path: str = "joint_pos_time.png"
 ):
-    """ Generates the Position vs Timestep Plot for all joints."""
+    """ Generates the Position vs Timestep Plot for all joints.
+    
+    Shows three lines per joint:
+    - Ground Truth (expert): black solid line
+    - Predicted Actions (policy targets): blue dashed — what the policy wants
+    - Actual qpos (after PD control): red solid — what actually happened
+    
+    The gap between predicted and actual reveals PD execution error.
+    The gap between ground truth and predicted reveals policy prediction error.
+    """
     if len(policy_trajectories) == 0:
         return None
 
@@ -352,17 +363,17 @@ def save_joint_pos_over_time_plot(
     else:
         num_joints = policy_trajectories[0].shape[1]
     
-    fig, axes = plt.subplots(nrows=num_joints, ncols=1, figsize=(10, 3 * num_joints))
+    fig, axes = plt.subplots(nrows=num_joints, ncols=1, figsize=(12, 3 * num_joints))
     if num_joints == 1: axes = [axes]
-    fig.suptitle("Joint Position over Time: Policy vs. Ground Truth", fontsize=16, fontweight='bold')
+    fig.suptitle("Joint Position over Time: Predicted vs. Actual vs. Ground Truth", fontsize=16, fontweight='bold')
     
     for j in range(num_joints):
         ax = axes[j]
         
-        # Plot all Policy Rollouts (Thin, translucent red)
+        # Plot all Actual qpos
         for i, p_q in enumerate(policy_trajectories):
             time_axis = np.arange(len(p_q))
-            label = 'Policy Rollout' if i == 0 else "_nolegend_"
+            label = 'Actual qpos (after PD)' if i == 0 else "_nolegend_"
             ax.plot(time_axis, p_q[:, j], color='red', alpha=0.3, linewidth=1.0, label=label)
 
         # Plot all Expert Ground Truths (Thick, black)
@@ -371,6 +382,13 @@ def save_joint_pos_over_time_plot(
                 time_axis = np.arange(len(e_q))
                 label = 'Motion Planner (Expert)' if i == 0 else "_nolegend_"
                 ax.plot(time_axis, e_q[:, j], color='black', linewidth=2, label=label)
+
+        # Plot all Predicted Actions
+        for i, p_a in enumerate(predicted_actions):
+            if p_a is not None and j < p_a.shape[1]:
+                time_axis = np.arange(len(p_a))
+                label = 'Predicted Action (PD target)' if i == 0 else "_nolegend_"
+                ax.plot(time_axis, p_a[:, j], color='dodgerblue', alpha=0.4, linewidth=1.0, linestyle='--', label=label)
 
         ax.set_title(f"Joint {j}")
         ax.set_ylabel("Position [rad]")
