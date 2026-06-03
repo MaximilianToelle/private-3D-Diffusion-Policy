@@ -1,4 +1,4 @@
-defaults:
+qdefaults:
   - task: adroit_hammer
 
 name: train_dp3
@@ -88,14 +88,14 @@ training:
   debug: False
   resume: True
   lr_scheduler: cosine
-  lr_warmup_steps: 40      # 1% of training, overfitting to single trajectory (2 steps per epoch)
+  lr_warmup_steps: 3600      # 1% of training -> 90 traj, 180 gradient steps per epoch, 2000 epochs
   num_epochs: 2000     
   gradient_accumulate_every: 1
   use_ema: True
-  rollout_every: 500
-  checkpoint_every: 500
-  val_every: 500
-  sample_every: 500              
+  rollout_every: 200
+  checkpoint_every: 200
+  val_every: 200
+  sample_every: 200              
   max_train_steps: null
   max_val_steps: null
   tqdm_interval_sec: 1.0
