@@ -1,4 +1,4 @@
-qdefaults:
+defaults:
   - task: adroit_hammer
 
 name: train_dp3
