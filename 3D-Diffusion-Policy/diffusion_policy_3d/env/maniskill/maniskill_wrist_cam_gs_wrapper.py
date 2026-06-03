@@ -112,16 +112,17 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
             newly_active_mask = active_gaussians_mask & ~self.prev_active_mask
         self.prev_active_mask = active_gaussians_mask  # update for next step
 
-        # NOTE: Policy outputs self.n_action_steps based on the last self.n_obs_steps
+        # Policy outputs self.n_action_steps based on the last self.n_obs_steps
         # Example: For the init default values, the policy receives obs from timestep (0, 0), (7, 8), (15, 16), (23, 24) ...
-        # so we need to resample at 0, 7, 15, 23, ... to benefit from the gsplat consistency property over time
-        if step == 0: #  or (step + self.n_obs_steps - 1) % self.n_action_steps == 0:
+        # We resample at 0, 7, 15, 23, ... to benefit from the gsplat consistency property over time
+        # NOTE: Such a high-frequent resampling represents the extreme case
+        if step == 0 or (step + self.n_obs_steps - 1) % self.n_action_steps == 0:
             assert obs['sensor_data']['gsplats'].shape[0] == 1, "Sampling needs modification to work for batched environments!"
-            
+                
             # Extracting all active Gaussians in current timestep and doing farthest point sampling on top
             active_indices_global = torch.where(active_gaussians_mask)[0]
 
-            # Random sampling WITHOUT replacement using topk on random values
+            # *Random sampling* WITHOUT replacement using topk on random values
             N_active = active_indices_global.shape[0]
             r = torch.rand(N_active, device=active_indices_global.device)
             _, topk_local = torch.topk(r, self.num_gaussians, largest=False)
