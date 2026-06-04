@@ -100,6 +100,9 @@ class TrainDP3Workspace:
             if lastest_ckpt_path.is_file():
                 print(f"Resuming from checkpoint {lastest_ckpt_path}")
                 self.load_checkpoint(path=lastest_ckpt_path)
+                # Checkpoint is saved at the end of an epoch before the final increments
+                self.global_step += 1
+                self.epoch += 1
 
         # configure dataset
         dataset: BaseDataset
@@ -140,7 +143,7 @@ class TrainDP3Workspace:
                     // cfg.training.gradient_accumulate_every,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
-            last_epoch=self.global_step-1
+            last_epoch=(self.global_step // cfg.training.gradient_accumulate_every) - 1
         )
 
         # configure ema
@@ -149,6 +152,7 @@ class TrainDP3Workspace:
             ema = hydra.utils.instantiate(
                 cfg.ema,
                 model=self.ema_model)
+            ema.optimization_step = self.global_step
 
         # configure env
         env_runner: BaseRunner
@@ -200,7 +204,7 @@ class TrainDP3Workspace:
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
-        for local_epoch_idx in range(cfg.training.num_epochs):
+        for local_epoch_idx in range(self.epoch, cfg.training.num_epochs):
             step_log = dict()
             # ========= train for this epoch ==========
             train_losses = list()
