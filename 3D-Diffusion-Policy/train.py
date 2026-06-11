@@ -10,6 +10,7 @@ if __name__ == "__main__":
 import os
 import hydra
 import torch
+import torch.profiler
 import dill
 from omegaconf import OmegaConf
 import pathlib
@@ -77,8 +78,8 @@ class TrainDP3Workspace:
         cfg = copy.deepcopy(self.cfg)
         
         if cfg.training.debug:
-            cfg.training.num_epochs = 1
-            cfg.training.max_train_steps = 2
+            cfg.training.num_epochs = 3
+            cfg.training.max_train_steps = 200
             cfg.training.max_val_steps = 2
             cfg.training.rollout_every = 1
             cfg.training.checkpoint_every = 1
@@ -194,6 +195,9 @@ class TrainDP3Workspace:
         if self.ema_model is not None:
             self.ema_model.to(device)
         optimizer_to(self.optimizer, device)
+        
+        # operator fusion via torch.compile
+        self.compiled_model = torch.compile(self.model, mode="max-autotune")
 
         # pre-select a fixed random batch for action MSE tracking (never used for gradient steps)
         # augmentations applied once here so the metric is fully deterministic across epochs
@@ -210,19 +214,23 @@ class TrainDP3Workspace:
             train_losses = list()
             with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
                     leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
+                t_before_next_batch = time.time()
                 for batch_idx, batch in enumerate(tepoch):
                     t1 = time.time()
+                   
                     # device transfer
                     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                    batch = self.train_augmentations(batch)
-
-                    # compute loss
                     t1_1 = time.time()
-                    raw_loss, loss_dict = self.model.compute_loss(batch)
+
+                    # augmentations
+                    batch = self.train_augmentations(batch)
+                    t1_2 = time.time()
+                    
+                    # compute loss
+                    raw_loss, loss_dict = self.compiled_model.compute_loss(batch)
                     loss = raw_loss / cfg.training.gradient_accumulate_every
                     loss.backward()
-                    
-                    t1_2 = time.time()
+                    t1_3 = time.time()
 
                     diagnostic_metrics = {}
                     if self.cfg.policy._target_ == "diffusion_policy_3d.policy.gsplat_dp3.GSplatDP3":
@@ -240,54 +248,73 @@ class TrainDP3Workspace:
                                 
                                 if last_linear_layer.weight.grad is not None:
                                     # Compute L2 norm of the gradient tensor
-                                    grad_norm = last_linear_layer.weight.grad.norm().item()
+                                    grad_norm = last_linear_layer.weight.grad.norm().detach()
                                     diagnostic_metrics[f'grad_norm/{key}'] = grad_norm
+                    t1_4 = time.time()
 
                     # step optimizer
                     if self.global_step % cfg.training.gradient_accumulate_every == 0:
                         self.optimizer.step()
-                        self.optimizer.zero_grad()
+                        self.optimizer.zero_grad(set_to_none=True)
                         lr_scheduler.step()
-                    t1_3 = time.time()
+                    t1_5 = time.time()
+                    
                     # update ema
                     if cfg.training.use_ema:
                         ema.step(self.model)
-                    t1_4 = time.time()
+                    t1_6 = time.time()
+                    
                     # logging
-                    raw_loss_cpu = raw_loss.item()
-                    tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
+                    raw_loss_cpu = raw_loss.detach()
                     train_losses.append(raw_loss_cpu)
+                    
+                    if batch_idx % 10 == 0 or batch_idx == len(train_dataloader) - 1:
+                        # Avoid forcing a CPU-GPU sync that blocks the pipeline by pulling 
+                        # a loss from 10 steps ago for the progress bar.
+                        delay_idx = max(0, len(train_losses) - 10)
+                        tepoch.set_postfix(loss=train_losses[delay_idx].item(), refresh=False)
+
                     step_log = {
                         'train_loss': raw_loss_cpu,
                         'global_step': self.global_step,
                         'epoch': self.epoch,
                         'lr': lr_scheduler.get_last_lr()[0]
                     }
-                    t1_5 = time.time()
+                    
                     # step_log.update(loss_dict)    # currently same as raw_loss
                     step_log.update(diagnostic_metrics)
-                    t2 = time.time()
-                    
-                    if verbose:
-                        print(f"total one step time: {t2-t1:.3f}")
-                        print(f" compute loss time: {t1_2-t1_1:.3f}")
-                        print(f" step optimizer time: {t1_3-t1_2:.3f}")
-                        print(f" update ema time: {t1_4-t1_3:.3f}")
-                        print(f" logging time: {t1_5-t1_4:.3f}")
 
                     is_last_batch = (batch_idx == (len(train_dataloader)-1))
                     if not is_last_batch:
                         # log of last step is combined with validation and rollout
-                        wandb_run.log(step_log, step=self.global_step)
+                        # wandb.log implicitly calls .item() on tensors. 
+                        # We log every 10 steps to eliminate the synchronization overhead per step.
+                        if self.global_step % 10 == 0:
+                            wandb_run.log(step_log, step=self.global_step)
                         self.global_step += 1
+
+                    t1_7 = time.time()
 
                     if (cfg.training.max_train_steps is not None) \
                         and batch_idx >= (cfg.training.max_train_steps-1):
                         break
 
+                    if verbose:
+                        print(f" total one step time: {t1_7-t_before_next_batch:.3f}")
+                        print(f" batch generation time {t1-t_before_next_batch:.3f}")
+                        print(f" device transfer time: {t1_1-t1:.3f}")
+                        print(f" augmentations time: {t1_2-t1_1:.3f}")
+                        print(f" compute loss time: {t1_3-t1_2:.3f}")
+                        print(f" diagnostic metrics time: {t1_4-t1_3:.3f}")
+                        print(f" step optimizer time: {t1_5-t1_4:.3f}")
+                        print(f" update ema time: {t1_6-t1_5:.3f}")
+                        print(f" logging time: {t1_7-t1_6:.3f}")
+
+                    t_before_next_batch = time.time()
+
             # at the end of each epoch
             # replace train_loss with epoch average
-            train_loss = np.mean(train_losses)
+            train_loss = torch.stack(train_losses).mean().detach()
             step_log['train_loss'] = train_loss
 
             # ========= eval for this epoch ==========
@@ -321,14 +348,14 @@ class TrainDP3Workspace:
                             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                             batch = self.eval_augmentations(batch)
                             
-                            loss, loss_dict = self.model.compute_loss(batch)
+                            loss, loss_dict = self.compiled_model.compute_loss(batch)
 
                             val_losses.append(loss)
                             if (cfg.training.max_val_steps is not None) \
                                 and batch_idx >= (cfg.training.max_val_steps-1):
                                 break
                     if len(val_losses) > 0:
-                        val_loss = torch.mean(torch.tensor(val_losses)).item()
+                        val_loss = torch.mean(torch.stack(val_losses)).detach()
                         # log epoch average validation loss
                         step_log['validation_loss'] = val_loss
 
@@ -343,7 +370,7 @@ class TrainDP3Workspace:
                     result = policy.predict_action(obs_dict)
                     pred_action = result['action_pred']
                     mse = torch.nn.functional.mse_loss(pred_action, gt_action)
-                    step_log['train_action_mse_error'] = mse.item()
+                    step_log['train_action_mse_error'] = mse.detach()
                     del result
                     del pred_action
                     del mse

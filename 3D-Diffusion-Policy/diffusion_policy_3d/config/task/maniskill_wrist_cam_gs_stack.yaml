@@ -10,7 +10,7 @@ env_runner:
 
 dataset:
   _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_dataset.WristCamGSManiskillDataset
-  zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_surface_normals_semantics
+  zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_positions_surf_normals_active_gaussians_mask_semantics
 
 train_augmentations:
   - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianRandomSample

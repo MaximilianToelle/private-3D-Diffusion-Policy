@@ -126,7 +126,7 @@ class GSplatLatentConcatSceneEncoder(nn.Module):
             group_outs.append(out)
 
             # Compute mean L2 norm across the feature dimension (dim=-1)
-            mag = out.norm(dim=-1).mean().item()
+            mag = out.norm(dim=-1).mean().detach()
             self._latest_feature_magnitudes[f'feature_mag/{key}'] = mag
 
         # 2. Concatenate

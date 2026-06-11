@@ -147,7 +147,7 @@ class GSplatDP3(BasePolicy):
 
         for t in scheduler.timesteps:
             # 1. apply conditioning
-            trajectory[condition_mask] = condition_data[condition_mask]
+            trajectory = torch.where(condition_mask, condition_data, trajectory)
 
 
             model_output = model(sample=trajectory,
@@ -160,7 +160,7 @@ class GSplatDP3(BasePolicy):
             
                 
         # finally make sure conditioning is enforced
-        trajectory[condition_mask] = condition_data[condition_mask]   
+        trajectory = torch.where(condition_mask, condition_data, trajectory)   
 
 
         return trajectory
@@ -305,7 +305,7 @@ class GSplatDP3(BasePolicy):
         loss_mask = ~condition_mask
 
         # apply conditioning
-        noisy_trajectory[condition_mask] = cond_data[condition_mask]
+        noisy_trajectory = torch.where(condition_mask, cond_data, noisy_trajectory)
 
         # Predict the noise residual
         
@@ -342,7 +342,7 @@ class GSplatDP3(BasePolicy):
         
 
         loss_dict = {
-                'bc_loss': loss.item(),
+                'bc_loss': loss.detach(),
             }
 
         # print(f"t2-t1: {t2-t1:.3f}")

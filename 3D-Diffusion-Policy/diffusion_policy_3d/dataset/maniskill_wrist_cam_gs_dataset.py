@@ -3,6 +3,7 @@ from typing import Dict
 import torch
 import numpy as np
 import time
+import zarr
 from tqdm import tqdm
 import copy
 from diffusion_policy_3d.common.replay_buffer import ReplayBuffer
@@ -42,6 +43,25 @@ class WristCamGSManiskillDataset(BaseDataset):
         # Policy only takes the first two obs out of the sequence, so we do manual slicing
         self.gsplats_array = self.replay_buffer.root['data']['gsplats']
         self.state_array = self.replay_buffer.root['data']['state']
+        
+        try:
+            self.gs_params = list(self.replay_buffer.root['meta'].attrs['gs_params'])
+            self.gs_param_sizes = list(self.replay_buffer.root['meta'].attrs['gs_param_sizes'])
+        except KeyError:
+            # Fallback for older datasets
+            self.gs_params = ["positions", "rotations_9d", "log_scales", "opacities", "rgbs", "active_gaussians_mask", "surf_normals", "semantics"]
+            self.gs_param_sizes = [3, 9, 3, 1, 3, 1, 3, 1]
+            
+        self.param_to_obs_key = {
+            'positions': 'gs_positions',
+            'rotations_9d': 'gs_rotations_9d',
+            'log_scales': 'gs_log_scales',
+            'opacities': 'gs_opacities',
+            'rgbs': 'gs_rgb',
+            'surf_normals': 'gs_surface_normals',
+            'semantics': 'gs_semantics',
+            'active_gaussians_mask': 'gs_active_gaussians_mask'
+        }
 
         val_mask = get_val_mask(
             n_episodes=self.replay_buffer.n_episodes, 
@@ -117,11 +137,13 @@ class WristCamGSManiskillDataset(BaseDataset):
         stats = {
             'action': {'min': None, 'max': None},
             'agent_pos': {'min': None, 'max': None},
-            'gs_positions': {'min': None, 'max': None},
+        }
+        if 'positions' in self.gs_params:
+            stats['gs_positions'] = {'min': None, 'max': None}
+        if 'log_scales' in self.gs_params:
             # For Gaussian normalization, we need mean and std.
             # We track count, sum, and sum of squares (using float64 to prevent numerical instability)
-            'gs_log_scales': {'count': 0, 'sum': 0.0, 'sum_sq': 0.0} 
-        }
+            stats['gs_log_scales'] = {'count': 0, 'sum': 0.0, 'sum_sq': 0.0} 
 
         # Helper function to update min/max dynamically
         def update_min_max(key, tensor):
@@ -146,81 +168,89 @@ class WristCamGSManiskillDataset(BaseDataset):
             # Update min/max bounds
             update_min_max('action', torch_data['action'])
             update_min_max('agent_pos', obs['agent_pos'])
-            update_min_max('gs_positions', obs['gs_positions'])
+            if 'positions' in self.gs_params:
+                update_min_max('gs_positions', obs['gs_positions'])
             
-            # Update sum and sum of squares for log_scales
-            # NOTE: We compute a single, global mean and std across scaling dimensions
-            # -> A Gaussian can rotate 90 degree and swap its x- and y-scales without changing its appearance!   
-            # NOTE: We cast to .double() to prevent catastrophic cancellation in large sum operations
-            log_scales_flat = obs['gs_log_scales'].reshape(-1).double()
-            stats['gs_log_scales']['count'] += log_scales_flat.shape[0]
-            stats['gs_log_scales']['sum'] += log_scales_flat.sum(dim=0)
-            stats['gs_log_scales']['sum_sq'] += (log_scales_flat ** 2).sum(dim=0)
+            if 'log_scales' in self.gs_params:
+                # Update sum and sum of squares for log_scales
+                # NOTE: We compute a single, global mean and std across scaling dimensions
+                # -> A Gaussian can rotate 90 degree and swap its x- and y-scales without changing its appearance!   
+                # NOTE: We cast to .double() to prevent catastrophic cancellation in large sum operations
+                log_scales_flat = obs['gs_log_scales'].reshape(-1).double()
+                stats['gs_log_scales']['count'] += log_scales_flat.shape[0]
+                stats['gs_log_scales']['sum'] += log_scales_flat.sum(dim=0)
+                stats['gs_log_scales']['sum_sq'] += (log_scales_flat ** 2).sum(dim=0)
 
         # 3. Compute final statistics from trackers
         normalizer = LinearNormalizer()
 
         # --- Positions (Preserving 3D Aspect Ratio) ---
-        pos_min = stats['gs_positions']['min']
-        pos_max = stats['gs_positions']['max']
-        geometric_center = (pos_max + pos_min) / 2.0
-        max_radius = torch.clamp((pos_max - pos_min).max() / 2.0, min=1e-4)
-
-        normalizer['gs_positions'] = SingleFieldLinearNormalizer.create_manual(
-            scale=torch.ones_like(geometric_center) / max_radius,
-            offset=-geometric_center / max_radius,
-            input_stats_dict={
-                'min': geometric_center - max_radius, 'max': geometric_center + max_radius,
-                'mean': geometric_center, 'std': pos_max - pos_min
-            }
-        )
-        normalizer['point_cloud'] = normalizer['gs_positions']
+        if 'positions' in self.gs_params:
+            pos_min = stats['gs_positions']['min']
+            pos_max = stats['gs_positions']['max']
+            geometric_center = (pos_max + pos_min) / 2.0
+            max_radius = torch.clamp((pos_max - pos_min).max() / 2.0, min=1e-4)
+    
+            normalizer['gs_positions'] = SingleFieldLinearNormalizer.create_manual(
+                scale=torch.ones_like(geometric_center) / max_radius,
+                offset=-geometric_center / max_radius,
+                input_stats_dict={
+                    'min': geometric_center - max_radius, 'max': geometric_center + max_radius,
+                    'mean': geometric_center, 'std': pos_max - pos_min
+                }
+            )
+            normalizer['point_cloud'] = normalizer['gs_positions']
 
         # --- Log Scales (Gaussian Normalization) ---
-        N = stats['gs_log_scales']['count']
-        mean_log_scales = stats['gs_log_scales']['sum'] / N
-        mean_squared_log_scales = stats['gs_log_scales']['sum_sq'] / N
-        # Variance = (Sum of Squares / N) - (Mean ^ 2)
-        var_log_scales = mean_squared_log_scales - (mean_log_scales ** 2)
-        std_log_scales = torch.sqrt(torch.clamp(var_log_scales.float(), min=1e-6))
-        # Cast to float32 after the math is safe
-        mean_log_scales = mean_log_scales.float()
-
-        normalizer['gs_log_scales'] = SingleFieldLinearNormalizer.create_manual(
-            scale=torch.full((3,), 1.0 / std_log_scales.item(), dtype=torch.float32),
-            offset=torch.full((3,), -mean_log_scales.item() / std_log_scales.item(), dtype=torch.float32),
-            input_stats_dict={
-                'min': torch.full((3,), mean_log_scales.item() - 3*std_log_scales.item()), 
-                'max': torch.full((3,), mean_log_scales.item() + 3*std_log_scales.item()),
-                'mean': torch.full((3,), mean_log_scales.item()), 
-                'std': torch.full((3,), std_log_scales.item())
-            }
-        )
+        if 'log_scales' in self.gs_params:
+            N = stats['gs_log_scales']['count']
+            mean_log_scales = stats['gs_log_scales']['sum'] / N
+            mean_squared_log_scales = stats['gs_log_scales']['sum_sq'] / N
+            # Variance = (Sum of Squares / N) - (Mean ^ 2)
+            var_log_scales = mean_squared_log_scales - (mean_log_scales ** 2)
+            std_log_scales = torch.sqrt(torch.clamp(var_log_scales.float(), min=1e-6))
+            # Cast to float32 after the math is safe
+            mean_log_scales = mean_log_scales.float()
+    
+            normalizer['gs_log_scales'] = SingleFieldLinearNormalizer.create_manual(
+                scale=torch.full((3,), 1.0 / std_log_scales.item(), dtype=torch.float32),
+                offset=torch.full((3,), -mean_log_scales.item() / std_log_scales.item(), dtype=torch.float32),
+                input_stats_dict={
+                    'min': torch.full((3,), mean_log_scales.item() - 3*std_log_scales.item()), 
+                    'max': torch.full((3,), mean_log_scales.item() + 3*std_log_scales.item()),
+                    'mean': torch.full((3,), mean_log_scales.item()), 
+                    'std': torch.full((3,), std_log_scales.item())
+                }
+            )
 
         # --- Hardcoded Physics Bounds ---
         # by construction (orthogonal matrix) between [-1, 1]
-        normalizer['gs_rotations_9d'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
-        normalizer['gs_surface_normals'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
+        if 'rotations_9d' in self.gs_params:
+            normalizer['gs_rotations_9d'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
+        if 'surf_normals' in self.gs_params:
+            normalizer['gs_surface_normals'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
 
-        # got processed with sigmoid -> [0, 1]
-        normalizer['gs_opacities'] = SingleFieldLinearNormalizer.create_manual(
-            scale=torch.tensor([2.0], dtype=torch.float32), 
-            offset=torch.tensor([-1.0], dtype=torch.float32),
-            input_stats_dict={
-                'min': torch.tensor([0.0]), 'max': torch.tensor([1.0]),
-                'mean': torch.tensor([0.5]), 'std': torch.tensor([0.5])
-            }
-        )
+        if 'opacities' in self.gs_params:
+            # got processed with sigmoid -> [0, 1]
+            normalizer['gs_opacities'] = SingleFieldLinearNormalizer.create_manual(
+                scale=torch.tensor([2.0], dtype=torch.float32), 
+                offset=torch.tensor([-1.0], dtype=torch.float32),
+                input_stats_dict={
+                    'min': torch.tensor([0.0]), 'max': torch.tensor([1.0]),
+                    'mean': torch.tensor([0.5]), 'std': torch.tensor([0.5])
+                }
+            )
 
-        # got processed to be normalized between [0, 1]
-        normalizer['gs_rgb'] = SingleFieldLinearNormalizer.create_manual(
-            scale=torch.tensor([2.0, 2.0, 2.0], dtype=torch.float32), 
-            offset=torch.tensor([-1.0, -1.0, -1.0], dtype=torch.float32),
-            input_stats_dict={
-                'min': torch.zeros(3), 'max': torch.ones(3),
-                'mean': torch.full((3,), 0.5), 'std': torch.full((3,), 0.5)
-            }
-        )
+        if 'rgbs' in self.gs_params:
+            # got processed to be normalized between [0, 1]
+            normalizer['gs_rgb'] = SingleFieldLinearNormalizer.create_manual(
+                scale=torch.tensor([2.0, 2.0, 2.0], dtype=torch.float32), 
+                offset=torch.tensor([-1.0, -1.0, -1.0], dtype=torch.float32),
+                input_stats_dict={
+                    'min': torch.zeros(3), 'max': torch.ones(3),
+                    'mean': torch.full((3,), 0.5), 'std': torch.full((3,), 0.5)
+                }
+            )
 
         # --- Actions and Agent Pos (separate normalization of each DOF as they have individual physical ranges!) ---
         for key in ['action', 'agent_pos']:
@@ -316,7 +346,6 @@ class WristCamGSManiskillDataset(BaseDataset):
     def _sample_to_data(self, sample, skip_subsampling=False):
         """ 
         Returns data as dict of torch tensors. 
-        NOTE: 20th dimension is the active Gaussians mask  
         """
 
         agent_pos = torch.from_numpy(sample['state'])
@@ -327,8 +356,13 @@ class WristCamGSManiskillDataset(BaseDataset):
         if not skip_subsampling:
             # Filter out non-active Gaussians at init timestep of sample
             # NOTE: Gaussians becoming active later don't matter as we do not consider them in farthest point sampling
-            active_gaussians_mask = gsplats[0, :, 19].to(torch.bool)
-            active_gsplats= gsplats[:, active_gaussians_mask, :]
+            if 'active_gaussians_mask' in self.gs_params:
+                # Find the index dynamically
+                active_idx = sum(self.gs_param_sizes[:self.gs_params.index('active_gaussians_mask')])
+                active_gaussians_mask = gsplats[0, :, active_idx].to(torch.bool)
+                active_gsplats = gsplats[:, active_gaussians_mask, :]
+            else:
+                active_gsplats = gsplats
 
             T, N, D = active_gsplats.shape
         
@@ -350,18 +384,20 @@ class WristCamGSManiskillDataset(BaseDataset):
             valid_length = gsplats.shape[1]
 
         obs_dict = {
-            'gs_positions': gsplats[..., :3],
-            'point_cloud': gsplats[..., :3],
-            'gs_rotations_9d': gsplats[..., 3:12],
-            'gs_log_scales': gsplats[..., 12:15],
-            'gs_opacities': gsplats[..., 15:16],
-            'gs_rgb': gsplats[..., 16:19],
-            'gs_surface_normals': gsplats[..., 20:23],
-            'gs_semantics': gsplats[..., 23:24],
             # CRITICAL: Return valid length for fps sampling during training
             'gs_length': torch.tensor(valid_length, dtype=torch.long), 
             'agent_pos': agent_pos,
         }
+        
+        # Dynamically populate obs_dict based on gs_params layout
+        curr = 0
+        for p, size in zip(self.gs_params, self.gs_param_sizes):
+            obs_key = self.param_to_obs_key.get(p, f"gs_{p}")
+            obs_dict[obs_key] = gsplats[..., curr:curr + size]
+            curr += size
+            
+        if 'positions' in self.gs_params:
+            obs_dict['point_cloud'] = obs_dict[self.param_to_obs_key['positions']]
 
         data = {
             'obs': obs_dict,
