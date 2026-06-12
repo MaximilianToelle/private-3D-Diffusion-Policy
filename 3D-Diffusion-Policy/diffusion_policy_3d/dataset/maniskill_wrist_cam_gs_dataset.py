@@ -34,8 +34,12 @@ class WristCamGSManiskillDataset(BaseDataset):
         self.zarr_path = zarr_path
         self.n_obs_steps = n_obs_steps
 
-        self.replay_buffer = ReplayBuffer.create_from_path(
-            zarr_path, mode='r')
+        # Reads continuously from dataset files 
+        # self.replay_buffer = ReplayBuffer.create_from_path(
+        #     zarr_path, mode='r')
+        
+        # Load the entire dataset into RAM.
+        self.replay_buffer = ReplayBuffer.copy_from_path(zarr_path)
 
         self.actor_keys = [k for k in self.replay_buffer.keys() if k.startswith('actor_pose_')]
         self.full_seq_keys = ['action'] + self.actor_keys
@@ -44,9 +48,15 @@ class WristCamGSManiskillDataset(BaseDataset):
         self.gsplats_array = self.replay_buffer.root['data']['gsplats']
         self.state_array = self.replay_buffer.root['data']['state']
         
+        meta = self.replay_buffer.root['meta']
+        
+        # In Numpy backend (ReplayBuffer.copy_from_path), attributes are mixed into the meta dict as standard keys.
+        # In Zarr backend (ReplayBuffer.create_from_path), they are located in meta.attrs.
+        attrs = meta if isinstance(meta, dict) else meta.attrs
+        
         try:
-            self.gs_params = list(self.replay_buffer.root['meta'].attrs['gs_params'])
-            self.gs_param_sizes = list(self.replay_buffer.root['meta'].attrs['gs_param_sizes'])
+            self.gs_params = list(attrs['gs_params'])
+            self.gs_param_sizes = list(attrs['gs_param_sizes'])
         except KeyError:
             # Fallback for older datasets
             self.gs_params = ["positions", "rotations_9d", "log_scales", "opacities", "rgbs", "active_gaussians_mask", "surf_normals", "semantics"]

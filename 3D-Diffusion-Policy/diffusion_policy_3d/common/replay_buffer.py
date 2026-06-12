@@ -158,6 +158,9 @@ class ReplayBuffer:
         if store is None:
             # numpy backend
             meta = dict()
+            # Mix Zarr attributes into the dictionary as standard keys
+            meta.update(src_root['meta'].attrs)
+            
             for key, value in src_root['meta'].items():
                 if len(value.shape) == 0:
                     meta[key] = np.array(value)
