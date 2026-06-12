@@ -22,7 +22,6 @@ import tqdm
 import numpy as np
 from termcolor import cprint
 import time
-import threading
 from hydra.core.hydra_config import HydraConfig
 from diffusion_policy_3d.policy.dp3 import DP3
 from diffusion_policy_3d.policy.gsplat_dp3 import GSplatDP3
@@ -39,12 +38,11 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 class TrainDP3Workspace:
     include_keys = ['global_step', 'epoch']
-    exclude_keys = tuple()
+    exclude_keys = ('compiled_model',)
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
         self.cfg = cfg
         self._output_dir = output_dir
-        self._saving_thread = None
         
         # set seed
         seed = cfg.training.seed
@@ -62,7 +60,7 @@ class TrainDP3Workspace:
         if cfg.training.use_ema:
             try:
                 self.ema_model = copy.deepcopy(self.model)
-            except: # minkowski engine could not be copied. recreate it
+            except Exception: # minkowski engine could not be copied. recreate it
                 self.ema_model = hydra.utils.instantiate(cfg.policy)
 
 
@@ -86,11 +84,9 @@ class TrainDP3Workspace:
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
             RUN_ROLLOUT = True
-            RUN_CKPT = True
             verbose = True
         else:
             RUN_ROLLOUT = True
-            RUN_CKPT = True
             verbose = False
         
         RUN_VALIDATION = False # reduce time cost
@@ -108,7 +104,7 @@ class TrainDP3Workspace:
         # configure dataset
         dataset: BaseDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
-        assert isinstance(dataset, BaseDataset), print(f"dataset must be BaseDataset, got {type(dataset)}")
+        assert isinstance(dataset, BaseDataset), f"dataset must be BaseDataset, got {type(dataset)}"
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         normalizer = dataset.get_normalizer()
 
@@ -135,16 +131,19 @@ class TrainDP3Workspace:
             self.ema_model.set_normalizer(normalizer)
 
         # configure lr scheduler
+        L = len(train_dataloader)
+        steps_per_epoch = L // cfg.training.gradient_accumulate_every
+        batches_in_current_epoch = self.global_step - self.epoch * L
+        optimizer_steps = self.epoch * steps_per_epoch + batches_in_current_epoch // cfg.training.gradient_accumulate_every
+
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=(
-                len(train_dataloader) * cfg.training.num_epochs) \
-                    // cfg.training.gradient_accumulate_every,
+            num_training_steps=steps_per_epoch * cfg.training.num_epochs,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
-            last_epoch=(self.global_step // cfg.training.gradient_accumulate_every) - 1
+            last_epoch=optimizer_steps - 1
         )
 
         # configure ema
@@ -153,7 +152,7 @@ class TrainDP3Workspace:
             ema = hydra.utils.instantiate(
                 cfg.ema,
                 model=self.ema_model)
-            ema.optimization_step = self.global_step
+            ema.optimization_step = optimizer_steps
 
         # configure env
         env_runner: BaseRunner
@@ -207,11 +206,11 @@ class TrainDP3Workspace:
         train_sampling_batch = self.train_augmentations(train_sampling_batch)
 
         # training loop
-        log_path = os.path.join(self.output_dir, 'logs.json.txt')
-        for local_epoch_idx in range(self.epoch, cfg.training.num_epochs):
+        for _ in range(self.epoch, cfg.training.num_epochs):
             step_log = dict()
             # ========= train for this epoch ==========
             train_losses = list()
+            self.optimizer.zero_grad(set_to_none=True)
             with tqdm.tqdm(train_dataloader, desc=f"Training epoch {self.epoch}", 
                     leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                 t_before_next_batch = time.time()
@@ -252,23 +251,27 @@ class TrainDP3Workspace:
                                     diagnostic_metrics[f'grad_norm/{key}'] = grad_norm
                     t1_4 = time.time()
 
+                    is_last_batch = (batch_idx == (len(train_dataloader) - 1))
+
                     # step optimizer
-                    if self.global_step % cfg.training.gradient_accumulate_every == 0:
+                    if (batch_idx + 1) % cfg.training.gradient_accumulate_every == 0:
                         self.optimizer.step()
                         self.optimizer.zero_grad(set_to_none=True)
                         lr_scheduler.step()
-                    t1_5 = time.time()
-                    
-                    # update ema
-                    if cfg.training.use_ema:
-                        ema.step(self.model)
-                    t1_6 = time.time()
-                    
+                        t1_5 = time.time()
+
+                        # update ema
+                        if cfg.training.use_ema:
+                            ema.step(self.model)
+                        t1_6 = time.time()
+                    else:
+                        t1_5 = t1_6 = t1_4
+
                     # logging
                     raw_loss_cpu = raw_loss.detach()
                     train_losses.append(raw_loss_cpu)
                     
-                    if batch_idx % 10 == 0 or batch_idx == len(train_dataloader) - 1:
+                    if batch_idx % 10 == 0 or is_last_batch:
                         # Avoid forcing a CPU-GPU sync that blocks the pipeline by pulling 
                         # a loss from 10 steps ago for the progress bar.
                         delay_idx = max(0, len(train_losses) - 10)
@@ -284,7 +287,6 @@ class TrainDP3Workspace:
                     # step_log.update(loss_dict)    # currently same as raw_loss
                     step_log.update(diagnostic_metrics)
 
-                    is_last_batch = (batch_idx == (len(train_dataloader)-1))
                     if not is_last_batch:
                         # log of last step is combined with validation and rollout
                         # wandb.log implicitly calls .item() on tensors. 
@@ -297,6 +299,7 @@ class TrainDP3Workspace:
 
                     if (cfg.training.max_train_steps is not None) \
                         and batch_idx >= (cfg.training.max_train_steps-1):
+                        self.optimizer.zero_grad(set_to_none=True)
                         break
 
                     if verbose:
@@ -394,9 +397,6 @@ class TrainDP3Workspace:
                     new_key = key.replace('/', '_')
                     metric_dict[new_key] = value
                 
-                # We can't copy the last checkpoint here
-                # since save_checkpoint uses threads.
-                # therefore at this point the file might have been empty!
                 topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
 
                 if topk_ckpt_path is not None:
@@ -441,7 +441,7 @@ class TrainDP3Workspace:
         if cfg.training.use_ema:
             policy = self.ema_model
         policy.eval()
-        policy.cuda()
+        policy.to(torch.device(cfg.training.device))
 
         runner_log = env_runner.run(policy, prefix=f"test_epoch_{self.epoch}", dataset=dataset)
         
@@ -461,8 +461,7 @@ class TrainDP3Workspace:
 
     def save_checkpoint(self, path=None, tag='latest', 
             exclude_keys=None,
-            include_keys=None,
-            use_thread=False):
+            include_keys=None):
         if path is None:
             path = pathlib.Path(self.output_dir).joinpath('checkpoints', f'{tag}.ckpt')
         else:
@@ -483,18 +482,10 @@ class TrainDP3Workspace:
             if hasattr(value, 'state_dict') and hasattr(value, 'load_state_dict'):
                 # modules, optimizers and samplers etc
                 if key not in exclude_keys:
-                    if use_thread:
-                        payload['state_dicts'][key] = _copy_to_cpu(value.state_dict())
-                    else:
-                        payload['state_dicts'][key] = value.state_dict()
+                    payload['state_dicts'][key] = value.state_dict()
             elif key in include_keys:
                 payload['pickles'][key] = dill.dumps(value)
-        if use_thread:
-            self._saving_thread = threading.Thread(
-                target=lambda : torch.save(payload, path.open('wb'), pickle_module=dill))
-            self._saving_thread.start()
-        else:
-            torch.save(payload, path.open('wb'), pickle_module=dill)
+        torch.save(payload, path.open('wb'), pickle_module=dill)
         
         del payload
         torch.cuda.empty_cache()
