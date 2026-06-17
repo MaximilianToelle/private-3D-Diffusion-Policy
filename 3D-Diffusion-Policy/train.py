@@ -63,7 +63,6 @@ class TrainDP3Workspace:
             except Exception: # minkowski engine could not be copied. recreate it
                 self.ema_model = hydra.utils.instantiate(cfg.policy)
 
-
         # configure training state
         self.optimizer = hydra.utils.instantiate(
             cfg.optimizer, params=self.model.parameters())
@@ -97,8 +96,8 @@ class TrainDP3Workspace:
             if lastest_ckpt_path.is_file():
                 print(f"Resuming from checkpoint {lastest_ckpt_path}")
                 self.load_checkpoint(path=lastest_ckpt_path)
-                # Checkpoint is saved at the end of an epoch before the final increments
-                self.global_step += 1
+                # Checkpoint is saved at the end of an epoch before epoch is incremented.
+                # global_step (optimizer updates) is already at its correct value.
                 self.epoch += 1
 
         # configure dataset
@@ -125,7 +124,6 @@ class TrainDP3Workspace:
         else:
             raise ValueError("Eval data augmentations must be explicitly provided in the dataset config!")
 
-
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
@@ -133,8 +131,6 @@ class TrainDP3Workspace:
         # configure lr scheduler
         L = len(train_dataloader)
         steps_per_epoch = L // cfg.training.gradient_accumulate_every
-        batches_in_current_epoch = self.global_step - self.epoch * L
-        optimizer_steps = self.epoch * steps_per_epoch + batches_in_current_epoch // cfg.training.gradient_accumulate_every
 
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
@@ -143,7 +139,7 @@ class TrainDP3Workspace:
             num_training_steps=steps_per_epoch * cfg.training.num_epochs,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
-            last_epoch=optimizer_steps - 1
+            last_epoch=self.global_step - 1
         )
 
         # configure ema
@@ -152,7 +148,7 @@ class TrainDP3Workspace:
             ema = hydra.utils.instantiate(
                 cfg.ema,
                 model=self.ema_model)
-            ema.optimization_step = optimizer_steps
+            ema.optimization_step = self.global_step
 
         # configure env
         env_runner: BaseRunner
@@ -207,7 +203,7 @@ class TrainDP3Workspace:
 
         # training loop
         for _ in range(self.epoch, cfg.training.num_epochs):
-            step_log = dict()
+            epoch_log = dict()
             # ========= train for this epoch ==========
             train_losses = list()
             self.optimizer.zero_grad(set_to_none=True)
@@ -231,30 +227,27 @@ class TrainDP3Workspace:
                     loss.backward()
                     t1_3 = time.time()
 
-                    diagnostic_metrics = {}
-                    if self.cfg.policy._target_ == "diffusion_policy_3d.policy.gsplat_dp3.GSplatDP3":
-                        # === For logging: Extract Gradient Norms and Feature Magnitudes === 
-                        extractor = self.model.obs_encoder.extractor
-                        # 1. Retrieve the feature magnitudes saved during the forward pass (if present)
-                        if hasattr(extractor, '_latest_feature_magnitudes'):
-                            diagnostic_metrics = copy.deepcopy(extractor._latest_feature_magnitudes)
-                        # 2. Extract gradient norms for the last linear layer of each shallow MLP (if present)
-                        if hasattr(extractor, 'param_groups'):
-                            for key in extractor.ordered_keys:
-                                # param_groups[key] is a Sequential(Linear, LayerNorm, Mish, Linear)
-                                # Index 3 is the final nn.Linear layer before concatenation
-                                last_linear_layer = extractor.param_groups[key][3]
-                                
-                                if last_linear_layer.weight.grad is not None:
-                                    # Compute L2 norm of the gradient tensor
-                                    grad_norm = last_linear_layer.weight.grad.norm().detach()
-                                    diagnostic_metrics[f'grad_norm/{key}'] = grad_norm
-                    t1_4 = time.time()
-
-                    is_last_batch = (batch_idx == (len(train_dataloader) - 1))
-
                     # step optimizer
+                    # diagnostic_metrics = {}
+                    t1_4 = t1_3
                     if (batch_idx + 1) % cfg.training.gradient_accumulate_every == 0:
+                    #     if self.cfg.policy._target_ == "diffusion_policy_3d.policy.gsplat_dp3.GSplatDP3":
+                    #         # === For logging: Extract Gradient Norms and Feature Magnitudes === 
+                    #         extractor = self.model.obs_encoder.extractor
+                    #         # 1. Retrieve the feature magnitudes saved during the forward pass (if present)
+                    #         if hasattr(extractor, '_latest_feature_magnitudes'):
+                    #             diagnostic_metrics = copy.deepcopy(extractor._latest_feature_magnitudes)
+                    #         # 2. Extract gradient norms for the last linear layer of each shallow MLP (if present)
+                    #         if hasattr(extractor, 'param_groups'):
+                    #             for key in extractor.ordered_keys:
+                    #                 # param_groups[key] is a Sequential(Linear, LayerNorm, Mish, Linear)
+                    #                 # Index 3 is the final nn.Linear layer before concatenation
+                    #                 last_linear_layer = extractor.param_groups[key][3]
+                    #                 if last_linear_layer.weight.grad is not None:
+                    #                     # Compute L2 norm of the gradient tensor
+                    #                     grad_norm = last_linear_layer.weight.grad.norm().detach()
+                    #                     diagnostic_metrics[f'grad_norm/{key}'] = grad_norm
+                    #    t1_4 = time.time()
                         self.optimizer.step()
                         self.optimizer.zero_grad(set_to_none=True)
                         lr_scheduler.step()
@@ -264,42 +257,31 @@ class TrainDP3Workspace:
                         if cfg.training.use_ema:
                             ema.step(self.model)
                         t1_6 = time.time()
+
+                        # global_step counts number of optimizer updates
+                        self.global_step += 1
                     else:
                         t1_5 = t1_6 = t1_4
 
                     # logging
-                    raw_loss_cpu = raw_loss.detach()
-                    train_losses.append(raw_loss_cpu)
-                    
-                    if batch_idx % 10 == 0 or is_last_batch:
-                        # Avoid forcing a CPU-GPU sync that blocks the pipeline by pulling 
-                        # a loss from 10 steps ago for the progress bar.
-                        delay_idx = max(0, len(train_losses) - 10)
-                        tepoch.set_postfix(loss=train_losses[delay_idx].item(), refresh=False)
-
-                    step_log = {
-                        'train_loss': raw_loss_cpu,
-                        'global_step': self.global_step,
-                        'epoch': self.epoch,
-                        'lr': lr_scheduler.get_last_lr()[0]
-                    }
-                    
-                    # step_log.update(loss_dict)    # currently same as raw_loss
-                    step_log.update(diagnostic_metrics)
-
-                    if not is_last_batch:
-                        # log of last step is combined with validation and rollout
-                        # wandb.log implicitly calls .item() on tensors. 
-                        # We log every 10 steps to eliminate the synchronization overhead per step.
-                        if self.global_step % 10 == 0:
-                            wandb_run.log(step_log, step=self.global_step)
-                        self.global_step += 1
-
+                    train_losses.append(raw_loss.detach())
+                    is_last_batch = (batch_idx == (len(train_dataloader) - 1))
+                    if (batch_idx + 1) % cfg.training.gradient_accumulate_every == 0:
+                        if self.global_step % 10 == 0 or is_last_batch:
+                            mean_loss = torch.stack(train_losses[-cfg.training.gradient_accumulate_every:]).mean().item()
+                            
+                            tepoch.set_postfix(loss=mean_loss, refresh=False)
+                            wandb_run.log({
+                                'train_loss': mean_loss,
+                                'global_step': self.global_step,
+                                'epoch': self.epoch,
+                                'lr': lr_scheduler.get_last_lr()[0],
+                            }, step=self.global_step)
                     t1_7 = time.time()
 
                     if (cfg.training.max_train_steps is not None) \
-                        and batch_idx >= (cfg.training.max_train_steps-1):
-                        self.optimizer.zero_grad(set_to_none=True)
+                        and batch_idx >= (cfg.training.max_train_steps-1) \
+                        and (batch_idx + 1) % cfg.training.gradient_accumulate_every == 0:
                         break
 
                     if verbose:
@@ -315,10 +297,8 @@ class TrainDP3Workspace:
 
                     t_before_next_batch = time.time()
 
-            # at the end of each epoch
-            # replace train_loss with epoch average
             train_loss = torch.stack(train_losses).mean().detach()
-            step_log['train_loss'] = train_loss
+            epoch_log['train_loss'] = train_loss
 
             # ========= eval for this epoch ==========
             policy = self.model
@@ -326,19 +306,21 @@ class TrainDP3Workspace:
                 policy = self.ema_model
             policy.eval()
 
+
             # run rollouts based on training and validation init poses
             if (self.epoch % cfg.training.rollout_every) == 0 and RUN_ROLLOUT and env_runner is not None:
                 t3 = time.time()
                 runner_log_train = env_runner.run(policy, dataset=dataset, prefix=f"train_epoch_{self.epoch}")
                 runner_log_val = env_runner.run(policy, dataset=val_dataset, prefix=f"val_epoch_{self.epoch}")
                 t4 = time.time()
-                # print(f"rollout time: {(t4-t3)/2:.3f}")
+                if verbose:
+                    print(f"rollout time: {(t4-t3)/2:.3f}")
                 
                 # log rollouts with prefix
                 for k, v in runner_log_train.items():
-                    step_log[f"train_{k}"] = v
+                    epoch_log[f"train_{k}"] = v
                 for k, v in runner_log_val.items():
-                    step_log[f"val_{k}"] = v
+                    epoch_log[f"val_{k}"] = v
 
             
             # get validation loss
@@ -351,7 +333,7 @@ class TrainDP3Workspace:
                             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                             batch = self.eval_augmentations(batch)
                             
-                            loss, loss_dict = self.compiled_model.compute_loss(batch)
+                            loss, loss_dict = policy.compute_loss(batch)
 
                             val_losses.append(loss)
                             if (cfg.training.max_val_steps is not None) \
@@ -360,7 +342,7 @@ class TrainDP3Workspace:
                     if len(val_losses) > 0:
                         val_loss = torch.mean(torch.stack(val_losses)).detach()
                         # log epoch average validation loss
-                        step_log['validation_loss'] = val_loss
+                        epoch_log['validation_loss'] = val_loss
 
 
             # run diffusion sampling on a training batch
@@ -373,7 +355,7 @@ class TrainDP3Workspace:
                     result = policy.predict_action(obs_dict)
                     pred_action = result['action_pred']
                     mse = torch.nn.functional.mse_loss(pred_action, gt_action)
-                    step_log['train_action_mse_error'] = mse.detach()
+                    epoch_log['train_action_mse_error'] = mse.detach()
                     del result
                     del pred_action
                     del mse
@@ -381,8 +363,11 @@ class TrainDP3Workspace:
             
             if env_runner is None:
                 # needed for checkpoint handling, TopKCheckpointManager looks at max scores 
-                step_log['val_mean_success_rates'] = - train_loss
-                
+                epoch_log['val_mean_success_rates'] = - train_loss
+
+            policy.train()
+            # ========= eval end for this epoch ==========
+            
             # checkpoint
             if (self.epoch % cfg.training.checkpoint_every) == 0 and cfg.checkpoint.save_ckpt:
                 # checkpointing
@@ -393,7 +378,7 @@ class TrainDP3Workspace:
 
                 # sanitize metric names
                 metric_dict = dict()
-                for key, value in step_log.items():
+                for key, value in epoch_log.items():
                     new_key = key.replace('/', '_')
                     metric_dict[new_key] = value
                 
@@ -401,15 +386,13 @@ class TrainDP3Workspace:
 
                 if topk_ckpt_path is not None:
                     self.save_checkpoint(path=topk_ckpt_path)
-            # ========= eval end for this epoch ==========
-            policy.train()
 
-            # end of epoch
-            # log of last step is combined with validation and rollout
-            wandb_run.log(step_log, step=self.global_step)
-            self.global_step += 1
+            # end of epoch — log epoch-level metrics (validation, rollout, etc.)
+            epoch_log['global_step'] = self.global_step
+            epoch_log['epoch'] = self.epoch
+            wandb_run.log(epoch_log, step=self.global_step)
             self.epoch += 1
-            del step_log
+            del epoch_log
 
     def eval(self, checkpoint_tag, use_dataset=False):
         # load the latest checkpoint
