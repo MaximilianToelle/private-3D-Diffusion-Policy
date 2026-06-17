@@ -93,8 +93,8 @@ training:
   num_epochs: 2000     
   gradient_accumulate_every: 1
   use_ema: True
-  rollout_every: 500
-  checkpoint_every: 200
+  rollout_every: 400
+  checkpoint_every: ${rollout_every}  # checkpoint.topk.monitor_key requires validation rollouts during same epoch!
   val_every: 200
   sample_every: 200              
   max_train_steps: null
