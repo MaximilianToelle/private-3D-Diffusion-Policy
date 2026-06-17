@@ -88,7 +88,7 @@ class TrainDP3Workspace:
             RUN_ROLLOUT = True
             verbose = False
         
-        RUN_VALIDATION = False # reduce time cost
+        RUN_VALIDATION = True # reduce time cost
         
         # resume training
         if cfg.training.resume:

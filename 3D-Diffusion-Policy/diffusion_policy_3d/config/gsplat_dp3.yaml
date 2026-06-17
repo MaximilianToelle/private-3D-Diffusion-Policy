@@ -7,7 +7,7 @@ name: train_gsplat_dp3
 
 policy:
   _target_: diffusion_policy_3d.policy.gsplat_dp3.GSplatDP3
-  encoder_output_dim: 64        # 128
+  encoder_output_dim: 64     # 128
   use_state_features: true
 
   # Gaussian Splatting parameters
