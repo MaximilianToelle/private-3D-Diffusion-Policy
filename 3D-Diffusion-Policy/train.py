@@ -368,6 +368,11 @@ class TrainDP3Workspace:
             policy.train()
             # ========= eval end for this epoch ==========
             
+            # end of epoch — log epoch-level metrics (validation, rollout, etc.)
+            epoch_log['global_step'] = self.global_step
+            epoch_log['epoch'] = self.epoch
+            wandb_run.log(epoch_log, step=self.global_step)
+
             # checkpoint
             if (self.epoch % cfg.training.checkpoint_every) == 0 and cfg.checkpoint.save_ckpt:
                 # checkpointing
@@ -387,12 +392,7 @@ class TrainDP3Workspace:
                 if topk_ckpt_path is not None:
                     self.save_checkpoint(path=topk_ckpt_path)
 
-            # end of epoch — log epoch-level metrics (validation, rollout, etc.)
-            epoch_log['global_step'] = self.global_step
-            epoch_log['epoch'] = self.epoch
-            wandb_run.log(epoch_log, step=self.global_step)
             self.epoch += 1
-            del epoch_log
 
     def eval(self, checkpoint_tag, use_dataset=False):
         # load the latest checkpoint
