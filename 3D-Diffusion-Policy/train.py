@@ -419,6 +419,7 @@ class TrainDP3Workspace:
         if use_dataset:
             dataset = hydra.utils.instantiate(cfg.task.dataset)
             assert isinstance(dataset, BaseDataset)
+            val_dataset = dataset.get_validation_dataset()
 
         policy = self.model
         if cfg.training.use_ema:
@@ -426,10 +427,15 @@ class TrainDP3Workspace:
         policy.eval()
         policy.to(torch.device(cfg.training.device))
 
-        runner_log = env_runner.run(policy, prefix=f"test_epoch_{self.epoch}", dataset=dataset)
+        if use_dataset:
+            runner_log = env_runner.run(policy, prefix=f"seperate_eval_val_epoch_{self.epoch}", dataset=val_dataset)
+            cprint(f"---------------- Eval Results - Validation Dataset --------------", 'magenta')
+            for key, value in runner_log.items():
+                if isinstance(value, float):
+                    cprint(f"{key}: {value:.4f}", 'magenta')
         
-      
-        cprint(f"---------------- Eval Results --------------", 'magenta')
+        runner_log = env_runner.run(policy, prefix=f"seperate_eval_test_epoch_{self.epoch}")
+        cprint(f"---------------- Eval Results - Test Dataset --------------", 'magenta')
         for key, value in runner_log.items():
             if isinstance(value, float):
                 cprint(f"{key}: {value:.4f}", 'magenta')
