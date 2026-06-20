@@ -308,7 +308,7 @@ class TrainDP3Workspace:
 
 
             # run rollouts based on training and validation init poses
-            if (self.epoch % cfg.training.rollout_every) == 0 and RUN_ROLLOUT and env_runner is not None:
+            if ((self.epoch + 1) % cfg.training.rollout_every) == 0 and RUN_ROLLOUT and env_runner is not None:
                 t3 = time.time()
                 runner_log_train = env_runner.run(policy, dataset=dataset, prefix=f"train_epoch_{self.epoch}")
                 runner_log_val = env_runner.run(policy, dataset=val_dataset, prefix=f"val_epoch_{self.epoch}")
@@ -324,7 +324,7 @@ class TrainDP3Workspace:
 
             
             # get validation loss
-            if (self.epoch % cfg.training.val_every) == 0 and RUN_VALIDATION:
+            if ((self.epoch + 1) % cfg.training.val_every) == 0 and RUN_VALIDATION:
                 with torch.no_grad():
                     val_losses = list()
                     with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
@@ -346,7 +346,7 @@ class TrainDP3Workspace:
 
 
             # run diffusion sampling on a training batch
-            if (self.epoch % cfg.training.sample_every) == 0:
+            if ((self.epoch + 1) % cfg.training.sample_every) == 0:
                 with torch.no_grad():
                     # use the fixed sampling batch (selected and augmented once before training)
                     obs_dict = train_sampling_batch['obs']
@@ -374,7 +374,7 @@ class TrainDP3Workspace:
             wandb_run.log(epoch_log, step=self.global_step)
 
             # checkpoint
-            if (self.epoch % cfg.training.checkpoint_every) == 0 and cfg.checkpoint.save_ckpt:
+            if ((self.epoch + 1) % cfg.training.checkpoint_every) == 0 and cfg.checkpoint.save_ckpt:
                 # checkpointing
                 if cfg.checkpoint.save_last_ckpt:
                     self.save_checkpoint()
