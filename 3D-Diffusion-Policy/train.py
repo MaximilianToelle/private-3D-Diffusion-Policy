@@ -173,8 +173,8 @@ class TrainDP3Workspace:
         wandb.config.update(
             {
                 "output_dir": self.output_dir,
-                "train_episode_indices": np.nonzero(dataset.train_mask)[0].tolist(), 
-                "val_episode_indices": np.nonzero(val_dataset.train_mask)[0].tolist(), 
+                "train_episode_indices": np.nonzero(dataset.global_train_mask)[0].tolist(), 
+                "val_episode_indices": np.nonzero(val_dataset.global_train_mask)[0].tolist(), 
             }
         )
 

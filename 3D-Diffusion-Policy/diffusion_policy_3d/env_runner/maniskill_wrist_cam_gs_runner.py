@@ -111,24 +111,13 @@ class WristCamGSManiSkillRunner(BaseRunner):
             expert_q_sequence = None
             
             if dataset is not None:
-                replay_buffer = dataset.replay_buffer
-                
-                # The dataset uses a boolean mask to filter episodes for training and validation.
-                # NOTE: Always using the train_mask as it is set to be the val_mask in the validation dataset
-                valid_episode_indices = np.where(dataset.train_mask)[0]
+                # Pick a random episode from the global train/val mask
+                # NOTE: global_train_mask is set to the val_mask in the validation dataset
+                valid_episode_indices = np.where(dataset.global_train_mask)[0]
                 random_episode_idx = np.random.choice(valid_episode_indices)
                 
-                start_idx = replay_buffer.episode_ends[random_episode_idx - 1] if random_episode_idx > 0 else 0
-                end_idx = replay_buffer.episode_ends[random_episode_idx]
-                
-                init_state = dict()
-                if hasattr(dataset, 'actor_keys') and len(dataset.actor_keys) > 0:
-                    init_state['actor_poses'] = {
-                        k: replay_buffer[k][start_idx] for k in dataset.actor_keys
-                    }
-                init_state['agent_pos'] = replay_buffer['state'][start_idx]
-
-                expert_q_sequence = replay_buffer['state'][start_idx:end_idx]
+                # get_episode_init_data handles multi-buffer routing internally
+                init_state, expert_q_sequence = dataset.get_episode_init_data(random_episode_idx)
 
             obs = env.reset(options={'init_state': init_state} if init_state is not None else None)
             policy.reset()

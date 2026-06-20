@@ -67,7 +67,7 @@ def evaluate_action_mse(checkpoint_path: str, dataset_path: str,
     assert isinstance(dataset, BaseDataset)
     normalizer = dataset.get_normalizer()
     cprint(f"Dataset loaded: {len(dataset)} samples from {cfg.task.dataset.zarr_path}", "cyan")
-    cprint(f"Training episodes: {np.nonzero(dataset.train_mask)[0].tolist()}", "cyan")
+    cprint(f"Training episodes: {np.nonzero(dataset.global_train_mask)[0].tolist()}", "cyan")
 
     # ── Configure augmentations (train augmentations to model training distribution) ──
     if 'train_augmentations' in cfg.task and cfg.task.train_augmentations is not None:
