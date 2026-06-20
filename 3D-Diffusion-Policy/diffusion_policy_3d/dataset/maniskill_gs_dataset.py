@@ -74,17 +74,9 @@ class GSManiskillDataset(BaseDataset):
         return val_set
 
     def get_normalizer(self, **kwargs):
-        stats_path = os.path.join(self.zarr_path, 'normalization_stats.pth')
-        if os.path.exists(stats_path):
-            print(f"Loading normalization stats from {stats_path}")
-            state_dict = torch.load(stats_path)
-            normalizer = LinearNormalizer()
-            normalizer.load_state_dict(state_dict)
-            return normalizer
-
-        print(f"Dataset does not contain normalization stats yet. Stats are computed now and saved for future runs...")
+        print(f"Computing normalization stats over the training dataset...")
         
-        norm_mask = np.ones(self.replay_buffer.n_episodes, dtype=bool)
+        norm_mask = self.train_mask
         norm_keys = ['action', 'state', 'gsplats']   # actor poses do not get normalized -> only used for reproducing init states
         normalization_sampler = SequenceSampler(
             replay_buffer=self.replay_buffer, 
@@ -222,10 +214,7 @@ class GSManiskillDataset(BaseDataset):
                 }
             )
 
-        # Save to cache
-        print(f"Saving normalization stats of {list(normalizer.params_dict.keys())} to {stats_path}")
-        torch.save(normalizer.state_dict(), stats_path)
-
+        normalizer.to(torch.float32)
         return normalizer
 
     def __len__(self) -> int:

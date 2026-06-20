@@ -249,36 +249,8 @@ class WristCamGSManiskillDataset(BaseDataset):
     # =====================================================================
     # Normalization
     # =====================================================================
-    def _get_stats_cache_path(self):
-        """
-        Deterministic cache path for normalization stats (depending on which datasets are being combined in this training run!).
-        Single dataset: inside the zarr directory (backward compatible).
-        Multiple datasets: hashed filename in the parent directory.
-        """
-        if len(self.zarr_paths) == 1:
-            return os.path.join(self.zarr_paths[0], 'normalization_stats.pth')
-        
-        paths_key = '|'.join(sorted(self.zarr_paths))
-        path_hash = hashlib.sha256(paths_key.encode()).hexdigest()[:16]
-        parent_dir = os.path.dirname(self.zarr_paths[0])
-        return os.path.join(parent_dir, f'normalization_stats_multi_{path_hash}.pth')
-
     def get_normalizer(self, **kwargs):
-        stats_path = self._get_stats_cache_path()
-        if os.path.exists(stats_path):
-            print(f"Loading normalization stats from {stats_path}")
-            state_dict = torch.load(stats_path)
-            normalizer = LinearNormalizer()
-            normalizer.load_state_dict(state_dict)
-            # for training dp3 on gsplat dataset
-            if 'point_cloud' not in normalizer.params_dict and 'gs_positions' in normalizer.params_dict:
-                normalizer['point_cloud'] = normalizer['gs_positions']
-            if 'gs_surface_normals' not in normalizer.params_dict:
-                normalizer['gs_surface_normals'] = SingleFieldLinearNormalizer.create_identity(dtype=torch.float32)
-            normalizer.to(torch.float32)
-            return normalizer
-
-        print(f"Normalization stats not cached. Computing over {len(self.replay_buffers)} dataset(s)...")
+        print(f"Computing normalization stats over {len(self.replay_buffers)} training dataset(s)...")
         
         stats = {
             'action': {'min': None, 'max': None},
@@ -304,7 +276,7 @@ class WristCamGSManiskillDataset(BaseDataset):
 
         # Stream over ALL buffers sequentially
         for buf_i, buf in enumerate(self.replay_buffers):
-            norm_mask = np.ones(buf.n_episodes, dtype=bool)
+            norm_mask = self.per_buffer_train_masks[buf_i]
             norm_keys = ['action', 'state', 'gsplats']      # actor poses are only used for reproducing init states
             normalization_sampler = SequenceSampler(
                 replay_buffer=buf, 
@@ -417,10 +389,7 @@ class WristCamGSManiskillDataset(BaseDataset):
                 }
             )
 
-        print(f"Saving normalization stats of {list(normalizer.params_dict.keys())} to {stats_path}")
-        torch.save(normalizer.state_dict(), stats_path)
         normalizer.to(torch.float32)
-
         return normalizer
 
     def __len__(self) -> int:
