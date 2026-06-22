@@ -67,6 +67,7 @@ dataloader:
   shuffle: True
   pin_memory: True
   persistent_workers: True
+  prefetch_factor: 4
   drop_last: True
 
 val_dataloader:
@@ -75,6 +76,7 @@ val_dataloader:
   shuffle: False
   pin_memory: True
   persistent_workers: True
+  prefetch_factor: 4
 
 optimizer:
   _target_: torch.optim.AdamW

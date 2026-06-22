@@ -6,10 +6,10 @@ name: maniskill_wrist_cam_gs_stack
 
 env_runner:
   _target_: diffusion_policy_3d.env_runner.maniskill_wrist_cam_gs_runner.WristCamGSManiSkillRunner
-  task_name: StackFr3WristCamEnv-v1
+  task_name: StackFr3WristCamSimpleEnv-v1
 
 dataset:
-  _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_dataset.WristCamGSManiskillDataset
+  _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_zarr_dataset.WristCamGSManiskillDataset
   # --- Three ways to specify datasets ---
   # 1. Single zarr path (has .zgroup inside):
   zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_positions_surf_normals_active_gaussians_mask_semantics
