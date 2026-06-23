@@ -71,17 +71,22 @@ class GaussianRandomSample:
         B, T, N, _ = obs['gs_positions'].shape
         device = obs['gs_positions'].device
         
-        lengths = obs.get('gs_length', None)
-        if 'gs_length' in obs:
-            del batch['obs']['gs_length']
+        # lengths = obs.get('gs_length', None)
+        # if 'gs_length' in obs:
+        #     del batch['obs']['gs_length']
 
         # Random sampling WITHOUT replacement using partial sort via topk
         r = torch.rand(B, N, device=device)
         
-        if lengths is not None:
-            # Push padded indices to the back so they are never selected
-            mask = torch.arange(N, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
-            r[mask] = 2.0  # any value > 1.0 ensures padded points lose to valid ones
+        # if lengths is not None:
+        #     # Push padded indices to the back so they are never selected
+        #     mask = torch.arange(N, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
+        #     r[mask] = 2.0  # any value > 1.0 ensures padded points lose to valid ones
+            
+        if 'gs_active_gaussians_mask' in obs:
+            # Shape is (B, T, N, 1). Take min over T to see if it's active over the full observation window
+            is_active_all_time = obs['gs_active_gaussians_mask'].min(dim=1)[0].squeeze(-1) > 0.5
+            r[~is_active_all_time] = 2.0  # Push inactive points to the back
             
         # topk(largest=False) returns K smallest values — i.e. K random valid indices
         _, sampled_indices = torch.topk(r, self.num_samples, dim=1, largest=False)

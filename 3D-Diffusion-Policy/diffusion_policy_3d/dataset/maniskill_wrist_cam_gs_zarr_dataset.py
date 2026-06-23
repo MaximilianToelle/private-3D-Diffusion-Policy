@@ -1,7 +1,8 @@
 import os
 import hashlib
-from typing import Dict, List
+from typing import Dict, List, Iterator
 import torch
+from torch.utils.data import Sampler
 import numpy as np
 import time
 import zarr
@@ -16,44 +17,45 @@ from diffusion_policy_3d.dataset.base_dataset import BaseDataset
 from pytorch3d.ops import sample_farthest_points
 
 
-def _discover_zarr_paths(zarr_path) -> List[str]:
-    """
-    Resolve zarr_path into a list of concrete zarr dataset paths.
+# TODO: Since we are back to loading all datasets into RAM, we could further optimize this code! 
+
+
+# class DatasetBlockSampler(Sampler[int]):
+#     """
+#     Treats each Zarr dataset as a single block. 
+#     Shuffles the order of the datasets, and shuffles the samples within each dataset.
+#     Exhausts one dataset completely before moving to the next.
+#     """
+#     def __init__(self, cumulative_lengths: List[int]):
+#         self.cumulative_lengths = cumulative_lengths
+#         self.num_datasets = len(cumulative_lengths)
+        
+#         # Each block is simply an entire dataset
+#         self.dataset_blocks = []
+#         start_idx = 0
+#         for end_idx in cumulative_lengths:
+#             self.dataset_blocks.append(np.arange(start_idx, end_idx))
+#             start_idx = end_idx
     
-    Three modes:
-      1. Single zarr dataset (str with .zgroup inside) -> [zarr_path]
-      2. Directory containing multiple zarr subdatasets  -> sorted list of all zarr children
-      3. Explicit list of paths                          -> list(zarr_path)
-    """
-    if not isinstance(zarr_path, str):
-        # Mode 3: explicit list (from Hydra ListConfig or Python list)
-        paths = list(zarr_path)
-        for p in paths:
-            assert os.path.isdir(p), f"Zarr path does not exist: {p}"
-        return paths
+#     def __iter__(self) -> Iterator[int]:
+#         # 1. Shuffle the order of the datasets (e.g., [Dataset 2, Dataset 0, Dataset 1])
+#         dataset_order = np.random.permutation(self.num_datasets)
+        
+#         for ds_idx in dataset_order:
+#             # 2. Fully shuffle the indices inside this specific dataset
+#             ds_indices = self.dataset_blocks[ds_idx]
+#             shuffled_indices = np.random.permutation(ds_indices)
+            
+#             # 3. Yield single integers (PyTorch DataLoader will group them into batches of 128!)
+#             for idx in shuffled_indices:
+#                 yield int(idx)
     
-    zarr_path = os.path.expanduser(zarr_path)
-    
-    if os.path.isfile(os.path.join(zarr_path, '.zgroup')):
-        # Mode 1: single zarr dataset
-        return [zarr_path]
-    
-    # Mode 2: parent directory containing zarr children
-    children = []
-    for name in sorted(os.listdir(zarr_path)):
-        child = os.path.join(zarr_path, name)
-        if os.path.isdir(child) and os.path.isfile(os.path.join(child, '.zgroup')):
-            children.append(child)
-    
-    assert len(children) > 0, (
-        f"zarr_path '{zarr_path}' is neither a zarr dataset nor a directory "
-        f"containing zarr datasets (no .zgroup files found in children)"
-    )
-    return children
+#     def __len__(self) -> int:
+#         return int(self.cumulative_lengths[-1]) if len(self.cumulative_lengths) > 0 else 0
 
 
 class WristCamGSManiskillDataset(BaseDataset):
-    INTERMEDIATE_SIZE = 32768   # doing further down-sampling on GPU after batch generation
+    # INTERMEDIATE_SIZE = 32768   # doing further down-sampling on GPU after batch generation
     
     def __init__(
         self,
@@ -66,9 +68,11 @@ class WristCamGSManiskillDataset(BaseDataset):
         val_ratio=0.0,
         max_train_episodes=None,
         num_gaussians=1024,
+        verbose=False,
     ):
         super().__init__()
         self.n_obs_steps = n_obs_steps
+        self.verbose = verbose
 
         # =====================================================================
         # Resolve zarr_path into concrete dataset paths
@@ -83,11 +87,13 @@ class WristCamGSManiskillDataset(BaseDataset):
         self.state_arrays = []
         
         for path in self.zarr_paths:
-            buf = ReplayBuffer.create_from_path(path, mode='r')
+            # buf = ReplayBuffer.create_from_path(path, mode='r')
+            buf = ReplayBuffer.copy_from_path(path)
+            
             self.replay_buffers.append(buf)
             self.gsplats_arrays.append(buf.root['data']['gsplats'])
             self.state_arrays.append(buf.root['data']['state'])
-
+ 
         # =====================================================================
         # Read gs_params / gs_param_sizes from the first buffer, verify all match
         # =====================================================================
@@ -395,12 +401,13 @@ class WristCamGSManiskillDataset(BaseDataset):
     def __len__(self) -> int:
         return int(self._cumulative_lengths[-1]) if len(self._cumulative_lengths) > 0 else 0
 
-    def _get_synced_obs_slice(self, raw_indices, zarr_array):
+    def _get_synced_obs_slice(self, raw_indices, zarr_array, name=""):
         """
         Extracts a short observation history synced to the trajectory sampler.
         Handles padding automatically if the policy asks for history that doesn't exist 
         (e.g., at the very first step of an episode).
         """
+        t_start = time.time()
 
         # 'disk' indices tell us which physical rows to read from the Zarr hard drive array.
         # 'tensor' indices tell us where to insert that data inside our final obs_slice.
@@ -414,7 +421,10 @@ class WristCamGSManiskillDataset(BaseDataset):
         # Failsafe: Never attempt to read past the physical end of the episode data
         num_frames_needed = min(num_frames_needed, disk_end - disk_start) 
         
+        t_before_read = time.time()
         raw_disk_frames = zarr_array[disk_start : disk_start + num_frames_needed]
+        t_after_read = time.time()
+        
         obs_slice = np.zeros(
             (self.n_obs_steps,) + raw_disk_frames.shape[1:], 
             dtype=raw_disk_frames.dtype
@@ -453,6 +463,16 @@ class WristCamGSManiskillDataset(BaseDataset):
             if insert_end < self.n_obs_steps:
                 obs_slice[insert_end:] = raw_disk_frames[-1]
                 
+        t_end = time.time()
+        if self.verbose:
+            pid = os.getpid()
+            print(
+                f"    [Worker {pid}] _get_synced_obs_slice ({name}):\n"
+                f"      - Index extraction: {(t_before_read - t_start) * 1000:.3f} ms\n"
+                f"      - Zarr Disk Read:   {(t_after_read - t_before_read) * 1000:.3f} ms\n"
+                f"      - Copy & Padding:   {(t_end - t_after_read) * 1000:.3f} ms\n"
+                f"      - Total:            {(t_end - t_start) * 1000:.3f} ms"
+            )
         return obs_slice
 
     def _sample_to_data(self, sample, skip_subsampling=False):
@@ -464,37 +484,37 @@ class WristCamGSManiskillDataset(BaseDataset):
         gsplats = torch.from_numpy(sample['gsplats'])
         D = gsplats.shape[-1]
 
-        if not skip_subsampling:
-            # Filter out non-active Gaussians at init timestep of sample
-            # NOTE: Gaussians becoming active later don't matter as we do not consider them during sampling
-            if 'active_gaussians_mask' in self.gs_params:
-                active_idx = sum(self.gs_param_sizes[:self.gs_params.index('active_gaussians_mask')])
-                active_gaussians_mask = gsplats[0, :, active_idx].to(torch.bool)
-                active_gsplats = gsplats[:, active_gaussians_mask, :]
-            else:
-                active_gsplats = gsplats
+        # if not skip_subsampling:
+        #     # Filter out non-active Gaussians at init timestep of sample
+        #     # NOTE: Gaussians becoming active later don't matter as we do not consider them during sampling
+        #     if 'active_gaussians_mask' in self.gs_params:
+        #         active_idx = sum(self.gs_param_sizes[:self.gs_params.index('active_gaussians_mask')])
+        #         active_gaussians_mask = gsplats[0, :, active_idx].to(torch.bool)
+        #         active_gsplats = gsplats[:, active_gaussians_mask, :]
+        #     else:
+        #         active_gsplats = gsplats
 
-            T, N, D = active_gsplats.shape
+        #     T, N, D = active_gsplats.shape
         
-            if N >= self.INTERMEDIATE_SIZE:
-                indices = torch.randperm(N)[:self.INTERMEDIATE_SIZE]
-                active_gsplats = active_gsplats[:, indices, :]
-                valid_length = self.INTERMEDIATE_SIZE
-            else:
-                # Zero Padding
-                # Safe because 'lengths' will tell the GPU to ignore these zeros during sampling
-                pad_size = self.INTERMEDIATE_SIZE - N
-                padding = torch.zeros((T, pad_size, D), dtype=active_gsplats.dtype)
-                active_gsplats = torch.cat([active_gsplats, padding], dim=1)
-                valid_length = N
+        #     if N >= self.INTERMEDIATE_SIZE:
+        #         indices = torch.randperm(N)[:self.INTERMEDIATE_SIZE]
+        #         active_gsplats = active_gsplats[:, indices, :]
+        #         valid_length = self.INTERMEDIATE_SIZE
+        #     else:
+        #         # Zero Padding
+        #         # Safe because 'lengths' will tell the GPU to ignore these zeros during sampling
+        #         pad_size = self.INTERMEDIATE_SIZE - N
+        #         padding = torch.zeros((T, pad_size, D), dtype=active_gsplats.dtype)
+        #         active_gsplats = torch.cat([active_gsplats, padding], dim=1)
+        #         valid_length = N
                 
-            gsplats = active_gsplats
-        else:
-            valid_length = gsplats.shape[1]
+        #     gsplats = active_gsplats
+        # else:
+        #     valid_length = gsplats.shape[1]
 
         obs_dict = {
             # CRITICAL: Return valid length for sampling during training
-            'gs_length': torch.tensor(valid_length, dtype=torch.long), 
+            # 'gs_length': torch.tensor(valid_length, dtype=torch.long), 
             'agent_pos': agent_pos,
         }
         
@@ -520,15 +540,85 @@ class WristCamGSManiskillDataset(BaseDataset):
         return data
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        buf_idx, local_idx = self._global_sample_to_local(idx)
+        t_1 = time.time()
 
+        buf_idx, local_idx = self._global_sample_to_local(idx)
+        t_2 = time.time()
+
+        # Track dataset block switches
+        # if not hasattr(self, "_worker_current_buf"):
+        #     self._worker_current_buf = {}
+        # pid = os.getpid()
+        # last_buf = self._worker_current_buf.get(pid, -1)
+        # if buf_idx != last_buf:
+        #     print(f"[Worker {pid}] Switched to reading from dataset {buf_idx} (prev: {last_buf})")
+        #     self._worker_current_buf[pid] = buf_idx
+        # t_3 = time.time()
+        t_3 = t_2
+        
         sample = self.samplers[buf_idx].sample_sequence(local_idx)
+        t_4 = time.time()
+        
         raw_indices = self.samplers[buf_idx].indices[local_idx]
+        t_5 = time.time()
         
-        sample['state'] = self._get_synced_obs_slice(raw_indices, self.state_arrays[buf_idx])
-        sample['gsplats'] = self._get_synced_obs_slice(raw_indices, self.gsplats_arrays[buf_idx])
-        
-        return self._sample_to_data(sample)
+        sample['state'] = self._get_synced_obs_slice(raw_indices, self.state_arrays[buf_idx], name="state")
+        sample['gsplats'] = self._get_synced_obs_slice(raw_indices, self.gsplats_arrays[buf_idx], name="gsplats")
+        t_6 = time.time()
+
+        data = self._sample_to_data(sample)
+        t_7 = time.time()
+
+        if self.verbose:
+            pid = os.getpid()
+            print(
+                f"\n[Worker {pid}] __getitem__ timings (idx: {idx}, buf: {buf_idx}, local: {local_idx}):\n"
+                f"  - Index Mapping:         {(t_2 - t_1) * 1000:.3f} ms\n"
+                f"  - Block Switch Tracking: {(t_3 - t_2) * 1000:.3f} ms\n"
+                f"  - Sequence Sampling:     {(t_4 - t_3) * 1000:.3f} ms\n"
+                f"  - Retrieve Indices:      {(t_5 - t_4) * 1000:.3f} ms\n"
+                f"  - Load Zarr Obs Slices:  {(t_6 - t_5) * 1000:.3f} ms\n"
+                f"  - Sample to Torch Data:  {(t_7 - t_6) * 1000:.3f} ms\n"
+                f"  - Total __getitem__:     {(t_7 - t_1) * 1000:.3f} ms"
+            )
+
+        return data
+
+
+def _discover_zarr_paths(zarr_path) -> List[str]:
+    """
+    Resolve zarr_path into a list of concrete zarr dataset paths.
+    
+    Three modes:
+      1. Single zarr dataset (str with .zgroup inside) -> [zarr_path]
+      2. Directory containing multiple zarr subdatasets  -> sorted list of all zarr children
+      3. Explicit list of paths                          -> list(zarr_path)
+    """
+    if not isinstance(zarr_path, str):
+        # Mode 3: explicit list (from Hydra ListConfig or Python list)
+        paths = list(zarr_path)
+        for p in paths:
+            assert os.path.isdir(p), f"Zarr path does not exist: {p}"
+        return paths
+    
+    zarr_path = os.path.expanduser(zarr_path)
+    
+    if os.path.isfile(os.path.join(zarr_path, '.zgroup')):
+        # Mode 1: single zarr dataset
+        return [zarr_path]
+    
+    # Mode 2: parent directory containing zarr children
+    children = []
+    for name in sorted(os.listdir(zarr_path)):
+        child = os.path.join(zarr_path, name)
+        if os.path.isdir(child) and os.path.isfile(os.path.join(child, '.zgroup')):
+            children.append(child)
+    
+    assert len(children) > 0, (
+        f"zarr_path '{zarr_path}' is neither a zarr dataset nor a directory "
+        f"containing zarr datasets (no .zgroup files found in children)"
+    )
+    return children
 
 
 if __name__ == "__main__":
@@ -554,6 +644,8 @@ if __name__ == "__main__":
         assert isinstance(dataset, BaseDataset), f"dataset must be BaseDataset, got {type(dataset)}"
         print(f"Dataset instantiated. Length: {len(dataset)}")
         
+        # dataset_block_sampler = DatasetBlockSampler(dataset._cumulative_lengths)
+        # train_dataloader = DataLoader(dataset, sampler=dataset_block_sampler, **cfg.dataloader)
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         print("DataLoader instantiated.")
 

@@ -243,6 +243,7 @@ class GSplatDP3(BasePolicy):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
     def compute_loss(self, batch):
+        t1 = time.time()
         # normalize input
         nobs = self.normalizer.normalize(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
@@ -279,6 +280,7 @@ class GSplatDP3(BasePolicy):
             cond_data = torch.cat([nactions, nobs_features], dim=-1)
             trajectory = cond_data.detach()
 
+        t2 = time.time()
 
         # generate impainting mask
         condition_mask = self.mask_generator(trajectory.shape)
@@ -299,7 +301,7 @@ class GSplatDP3(BasePolicy):
         noisy_trajectory = self.noise_scheduler.add_noise(
             trajectory, noise, timesteps)
         
-
+        t3 = time.time()
 
         # compute loss mask
         loss_mask = ~condition_mask
@@ -314,6 +316,7 @@ class GSplatDP3(BasePolicy):
                             local_cond=local_cond, 
                             global_cond=global_cond)
 
+        t4 = time.time()
 
         pred_type = self.noise_scheduler.config.prediction_type 
         if pred_type == 'epsilon':
@@ -335,21 +338,24 @@ class GSplatDP3(BasePolicy):
         else:
             raise ValueError(f"Unsupported prediction type {pred_type}")
 
+        t5 = time.time()
+
         loss = F.mse_loss(pred, target, reduction='none')
         loss = loss * loss_mask.type(loss.dtype)
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss.mean()
         
+        t6 = time.time()
 
         loss_dict = {
                 'bc_loss': loss.detach(),
             }
 
-        # print(f"t2-t1: {t2-t1:.3f}")
-        # print(f"t3-t2: {t3-t2:.3f}")
-        # print(f"t4-t3: {t4-t3:.3f}")
-        # print(f"t5-t4: {t5-t4:.3f}")
-        # print(f"t6-t5: {t6-t5:.3f}")
+        # print(f"t2-t1 (obs encoder): {t2-t1:.4f}")
+        # print(f"t3-t2 (add noise): {t3-t2:.4f}")
+        # print(f"t4-t3 (model pred): {t4-t3:.4f}")
+        # print(f"t5-t4 (target prep): {t5-t4:.4f}")
+        # print(f"t6-t5 (loss calc): {t6-t5:.4f}")
         
         return loss, loss_dict
 

@@ -12,13 +12,21 @@ dataset:
   _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_zarr_dataset.WristCamGSManiskillDataset
   # --- Three ways to specify datasets ---
   # 1. Single zarr path (has .zgroup inside):
-  zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_positions_surf_normals_active_gaussians_mask_semantics
+  # zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_positions_surf_normals_active_gaussians_mask_semantics
   # 2. Parent directory (all zarr children auto-discovered):
   # zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_all
   # 3. Explicit list:
-  # zarr_path:
-  #   - /path/to/dataset_1
-  #   - /path/to/dataset_1
+  zarr_path:
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_1_positions_surf_normals_active_gaussians_mask_semantics_downsampled_8192
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_2_positions_surf_normals_active_gaussians_mask_semantics_downsampled_8192
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_3_positions_surf_normals_active_gaussians_mask_semantics_downsampled_8192
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_4_positions_surf_normals_active_gaussians_mask_semantics_downsampled_8192
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_5_positions_surf_normals_active_gaussians_mask_semantics_downsampled_8192
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_6_positions_surf_normals_active_gaussians_mask_semantics_downsampled_8192
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_7_positions_surf_normals_active_gaussians_mask_semantics_downsampled_8192
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_8_positions_surf_normals_active_gaussians_mask_semantics_downsampled_8192
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_9_positions_surf_normals_active_gaussians_mask_semantics_downsampled_8192
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_10_positions_surf_normals_active_gaussians_mask_semantics_downsampled_8192
 
 train_augmentations:
   - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianRandomSample
