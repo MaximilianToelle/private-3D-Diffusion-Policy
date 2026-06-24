@@ -228,26 +228,25 @@ class TrainDP3Workspace:
                     t1_3 = time.time()
 
                     # step optimizer
-                    # diagnostic_metrics = {}
                     t1_4 = t1_3
                     if (batch_idx + 1) % cfg.training.gradient_accumulate_every == 0:
-                    #     if self.cfg.policy._target_ == "diffusion_policy_3d.policy.gsplat_dp3.GSplatDP3":
-                    #         # === For logging: Extract Gradient Norms and Feature Magnitudes === 
-                    #         extractor = self.model.obs_encoder.extractor
-                    #         # 1. Retrieve the feature magnitudes saved during the forward pass (if present)
-                    #         if hasattr(extractor, '_latest_feature_magnitudes'):
-                    #             diagnostic_metrics = copy.deepcopy(extractor._latest_feature_magnitudes)
-                    #         # 2. Extract gradient norms for the last linear layer of each shallow MLP (if present)
-                    #         if hasattr(extractor, 'param_groups'):
-                    #             for key in extractor.ordered_keys:
-                    #                 # param_groups[key] is a Sequential(Linear, LayerNorm, Mish, Linear)
-                    #                 # Index 3 is the final nn.Linear layer before concatenation
-                    #                 last_linear_layer = extractor.param_groups[key][3]
-                    #                 if last_linear_layer.weight.grad is not None:
-                    #                     # Compute L2 norm of the gradient tensor
-                    #                     grad_norm = last_linear_layer.weight.grad.norm().detach()
-                    #                     diagnostic_metrics[f'grad_norm/{key}'] = grad_norm
-                    #    t1_4 = time.time()
+                        # gradient clipping & norm computation (must happen before optimizer.step)
+                        if cfg.training.grad_clip_norm is not None:
+                            # clip_grad_norm_ returns the total (pre-clip) L2 norm
+                            # global norm clipping to preserve gradient direction (in contrast to value clipping)
+                            grad_norm = torch.nn.utils.clip_grad_norm_(
+                                self.model.parameters(),
+                                max_norm=cfg.training.grad_clip_norm
+                            ).item()
+                        else:
+                            # no clipping, but still compute the global L2 norm for logging
+                            # torch version does not yet have torch.nn.utils.get_total_norm
+                            grad_norm = torch.nn.utils.clip_grad_norm_(
+                                self.model.parameters(),
+                                max_norm=float('inf')
+                            ).item()
+                        t1_4 = time.time()
+
                         self.optimizer.step()
                         self.optimizer.zero_grad(set_to_none=True)
                         lr_scheduler.step()
@@ -267,16 +266,19 @@ class TrainDP3Workspace:
                     train_losses.append(raw_loss.detach())
                     is_last_batch = (batch_idx == (len(train_dataloader) - 1))
                     if (batch_idx + 1) % cfg.training.gradient_accumulate_every == 0:
-                        if self.global_step % 10 == 0 or is_last_batch:
+                        if self.global_step % 50 == 0 or is_last_batch:
                             mean_loss = torch.stack(train_losses[-cfg.training.gradient_accumulate_every:]).mean().item()
                             
-                            tepoch.set_postfix(loss=mean_loss, refresh=False)
-                            wandb_run.log({
+                            log_dict = {
                                 'train_loss': mean_loss,
+                                'total_l2_grad_norm': grad_norm,
                                 'global_step': self.global_step,
                                 'epoch': self.epoch,
                                 'lr': lr_scheduler.get_last_lr()[0],
-                            }, step=self.global_step)
+                            }
+                            
+                            tepoch.set_postfix(loss=mean_loss, refresh=False)
+                            wandb_run.log(log_dict, step=self.global_step)
                     t1_7 = time.time()
 
                     if (cfg.training.max_train_steps is not None) \

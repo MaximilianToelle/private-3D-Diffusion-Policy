@@ -90,10 +90,11 @@ training:
   seed: 42
   debug: False
   resume: True
-  lr_scheduler: cosine
+  lr_scheduler: cosine       # constant, constant_with_warmup
   lr_warmup_steps: 3600      # 1% of training -> 90 traj, 180 gradient steps per epoch, 2000 epochs
   num_epochs: 2000     
   gradient_accumulate_every: 1
+  grad_clip_norm: null         # max_norm for clip_grad_norm_; set to null to disable gradient clipping
   use_ema: True
   rollout_every: 400
   checkpoint_every: ${training.rollout_every}  # checkpoint.topk.monitor_key requires validation rollouts during same epoch!
