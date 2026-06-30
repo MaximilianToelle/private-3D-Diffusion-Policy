@@ -46,7 +46,10 @@ class LinearNormalizer(DictOfTensorMixin):
         return self.normalize(x)
     
     def __getitem__(self, key: str):
-        return SingleFieldLinearNormalizer(self.params_dict[key])
+        params = self.params_dict[key]
+        if 'per_timestep' in params:
+            return PerTimestepLinearNormalizer(params)
+        return SingleFieldLinearNormalizer(params)
 
     def __setitem__(self, key: str , value: 'SingleFieldLinearNormalizer'):
         self.params_dict[key] = value.params_dict
@@ -58,12 +61,18 @@ class LinearNormalizer(DictOfTensorMixin):
                 if key not in self.params_dict:
                     continue
                 params = self.params_dict[key]
-                result[key] = _normalize(value, params, forward=forward)
+                # Dispatch to per-timestep or standard normalize
+                if 'per_timestep' in params:
+                    result[key] = _normalize_per_timestep(value, params, forward=forward)
+                else:
+                    result[key] = _normalize(value, params, forward=forward)
             return result
         else:
             if '_default' not in self.params_dict:
                 raise RuntimeError("Not initialized")
             params = self.params_dict['_default']
+            if 'per_timestep' in params:
+                return _normalize_per_timestep(x, params, forward=forward)
             return _normalize(x, params, forward=forward)
 
     def normalize(self, x: Union[Dict, torch.Tensor, np.ndarray]) -> torch.Tensor:
@@ -180,6 +189,92 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         return self.normalize(x)
 
 
+class PerTimestepLinearNormalizer(DictOfTensorMixin):
+    """
+    Per-timestep, per-feature-dimension linear normalizer.
+    
+    Implements the TRI-LBM percentile normalization:
+        yi = clamp(2 * (xi - p02) / (p98 - p02) - 1, -1.5, 1.5)
+    
+    Stores scale/offset of shape (T, D) (flattened to T*D for state_dict compatibility).
+    Supports input shapes:
+        - (T, D)       → single sample, no batch
+        - (B, T, D)    → batched (e.g., agent_pos, action)
+        - (T, N, D)    → single sample with N points/Gaussians
+        - (B, T, N, D) → batched with N points/Gaussians
+    
+    Clamping to [-1.5, 1.5] is applied during normalize (forward) only.
+    Unnormalize (backward) is never clamped, since the only unnormalized output 
+    is actions, and the policy should be free to predict beyond training range.
+    """
+
+    @classmethod
+    def create_clamped_percentile_normalizer(
+        cls,
+        p02: torch.Tensor,
+        p98: torch.Tensor,
+        n_timesteps: int,
+        n_features: int,
+        clamp_min: float = -1.5,
+        clamp_max: float = 1.5,
+        dtype: torch.dtype = torch.float32,
+    ) -> 'PerTimestepLinearNormalizer':
+        """
+        Create a per-timestep percentile normalizer.
+        
+        Args:
+            p02: 2nd percentile values, shape (T, D)
+            p98: 98th percentile values, shape (T, D)
+            n_timesteps: number of timesteps T
+            n_features: number of feature dimensions D
+            clamp_min: lower clamp bound (default -1.5)
+            clamp_max: upper clamp bound (default 1.5)
+            dtype: output dtype
+        """
+        assert p02.shape == (n_timesteps, n_features), \
+            f"p02 shape {p02.shape} != ({n_timesteps}, {n_features})"
+        assert p98.shape == p02.shape
+
+        p02 = p02.to(dtype)
+        p98 = p98.to(dtype)
+
+        # TRI-LBM formula: y = 2 * (x - p02) / (p98 - p02) - 1
+        # => y = x * scale + offset
+        # where scale = 2 / (p98 - p02), offset = -2*p02/(p98-p02) - 1
+        denom = torch.clamp(p98 - p02, min=1e-6)
+        scale = (2.0 / denom)           # (T, D)
+        offset = -scale * p02 - 1.0     # (T, D)
+
+        params_dict = nn.ParameterDict({
+            'scale': scale,                     # (T, D)
+            'offset': offset,                   # (T, D)
+            'per_timestep': nn.Parameter(torch.tensor([True], dtype=torch.bool), requires_grad=False),     # flag
+            'n_timesteps': torch.tensor([n_timesteps], dtype=dtype),
+            'n_features': torch.tensor([n_features], dtype=dtype),
+            'clamp_min': torch.tensor([clamp_min], dtype=dtype),
+            'clamp_max': torch.tensor([clamp_max], dtype=dtype),
+            'input_stats': nn.ParameterDict({
+                '2nd percentile': p02.flatten(),
+                '98th percentile': p98.flatten(),
+            })
+        })
+        for p in params_dict.parameters():
+            p.requires_grad_(False)
+        return cls(params_dict)
+
+    def normalize(self, x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+        return _normalize_per_timestep(x, self.params_dict, forward=True)
+
+    def unnormalize(self, x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+        return _normalize_per_timestep(x, self.params_dict, forward=False)
+
+    def get_input_stats(self):
+        return self.params_dict['input_stats']
+
+    def __call__(self, x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+        return self.normalize(x)
+
+
 
 def _fit(data: Union[torch.Tensor, np.ndarray, zarr.Array],
         last_n_dims=1,
@@ -277,6 +372,74 @@ def _normalize(x, params, forward=True):
     else:
         x = (x - offset) / scale
     x = x.reshape(src_shape)
+    return x
+
+
+def _normalize_per_timestep(x, params, forward=True):
+    """
+    Per-timestep, per-feature-dim normalization with forward clamping if clamp_min and clamp_max are given in params.
+    
+    Handles shapes:
+        (T, D)       - single sample, no batch
+        (B, T, D)    - batched
+        (T, N, D)    - single sample with spatial dim (e.g., Gaussians)
+        (B, T, N, D) - batched with spatial dim
+    """
+    assert 'scale' in params
+    if isinstance(x, np.ndarray):
+        x = torch.from_numpy(x)
+    
+    scale = params['scale']             # (T, D)
+    offset = params['offset']           # (T, D)
+    x = x.to(device=scale.device, dtype=scale.dtype)
+    
+    T = int(params['n_timesteps'].item())
+    D = int(params['n_features'].item())
+    
+    ndim = x.dim()
+    if ndim == 2:
+        # (T, D) - no broadcasting needed
+        assert x.shape == (T, D), f"Expected ({T}, {D}), got {x.shape}"
+        if forward:
+            x = x * scale + offset
+        else:
+            x = (x - offset) / scale
+    elif ndim == 3:
+        if x.shape[-2] == T and x.shape[-1] == D:
+            # (B, T, D) - broadcast scale (T, D) over batch
+            if forward:
+                x = x * scale.unsqueeze(0) + offset.unsqueeze(0)
+            else:
+                x = (x - offset.unsqueeze(0)) / scale.unsqueeze(0)
+        else:
+            # (T, N, D) - broadcast scale (T, 1, D) over spatial dim N
+            assert x.shape[0] == T and x.shape[-1] == D, \
+                f"Expected (T={T}, N, D={D}), got {x.shape}"
+            if forward:
+                x = x * scale[:, None, :] + offset[:, None, :]
+            else:
+                x = (x - offset[:, None, :]) / scale[:, None, :]
+    elif ndim == 4:
+        # (B, T, N, D) - broadcast scale (1, T, 1, D) over batch and spatial
+        assert x.shape[-3] == T and x.shape[-1] == D, \
+            f"Expected (B, T={T}, N, D={D}), got {x.shape}"
+        if forward:
+            x = x * scale[None, :, None, :] + offset[None, :, None, :]
+        else:
+            x = (x - offset[None, :, None, :]) / scale[None, :, None, :]
+    else:
+        raise ValueError(
+            f"Unsupported shape {x.shape} for per-timestep normalization "
+            f"with T={T}, D={D}. Expected 2D, 3D, or 4D tensor."
+        )
+    
+    # Clamp only during normalize (forward). Unnormalize is never clamped because
+    # the only unnormalized output is actions, where the policy should predict freely.
+    if forward and 'clamp_min' in params and 'clamp_max' in params:
+        c_min = params['clamp_min'].item()
+        c_max = params['clamp_max'].item()
+        x = torch.clamp(x, min=c_min, max=c_max)
+    
     return x
 
 

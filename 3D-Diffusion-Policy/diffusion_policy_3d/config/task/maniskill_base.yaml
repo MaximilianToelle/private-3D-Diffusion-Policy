@@ -24,4 +24,4 @@ dataset:
   pad_after: ${eval:'${n_action_steps}-1'}
   seed: 42
   val_ratio: 0.05
-  max_train_episodes: null  # use max number of train episodes while respecting val_ratio
+  max_train_episodes: null  # null: use max number of train episodes while respecting val_ratio

@@ -45,6 +45,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
                  num_gaussians=1024,
                  use_gsplat_viewer=False,
                  scene_gs_cfg_name="fr3_stack",
+                 representation_space="relative_ee_pose",
                  ):
         super().__init__(output_dir)
         self.task_name = task_name
@@ -69,7 +70,8 @@ class WristCamGSManiSkillRunner(BaseRunner):
                 robot_pipe, 
                 scene_gs_cfg_name=scene_gs_cfg_name, 
                 device=device, 
-                use_gsplat_viewer=use_gsplat_viewer
+                use_gsplat_viewer=use_gsplat_viewer,
+                obs_frame="tcp" if representation_space == "relative_ee_pose" else "world",
             )
             
             return MultiStepWrapper(
