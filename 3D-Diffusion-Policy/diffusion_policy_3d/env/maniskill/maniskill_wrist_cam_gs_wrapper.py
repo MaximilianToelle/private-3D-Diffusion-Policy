@@ -17,12 +17,16 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
     def __init__(
         self, 
         env, 
+        representation_space,
         num_gaussians=1024, 
         n_action_steps=8,
         n_obs_steps=2,
     ):
         super().__init__()
         self.env = env
+        assert representation_space in ("abs_joint_pos", "relative_ee_pose"), \
+            f"representation_space must be 'abs_joint_pos' or 'relative_ee_pose', got '{representation_space}'"
+        self.representation_space = representation_space
         self.num_gaussians = num_gaussians
         self.n_action_steps = n_action_steps
         self.n_obs_steps = n_obs_steps
@@ -39,13 +43,13 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
         self.prev_active_mask = None
 
         obs, _ = self.env.reset()
-        dummy_state = self._extract_state(obs)
-        self.obs_sensor_dim = dummy_state.shape[0]
+        dummy_agent_proprio = self._extract_agent_proprio(obs)
+        self.agent_proprio_dim = dummy_agent_proprio.shape[0]
 
         self.observation_space = spaces.Dict({
-            'agent_pos': spaces.Box(
+            'agent_proprio': spaces.Box(
                 low=-float('inf'), high=float('inf'),
-                shape=(self.obs_sensor_dim,),
+                shape=(self.agent_proprio_dim,),
                 dtype='float32'
             ),
             'gs_positions': spaces.Box(
@@ -85,18 +89,27 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
             ),
         })
         
-    def _extract_state(self, obs):
+    def _extract_agent_proprio(self, obs):
         # We assume the env returns unbatched shapes or batched arrays of size (1, ...)
-        qpos = obs['agent']['qpos']
-        if len(qpos.shape) > 1:
-            qpos = qpos[0]
-        return qpos.float()
+        if self.representation_space == "abs_joint_pos":
+            qpos = obs['agent']['qpos']
+            if len(qpos.shape) > 1:
+                qpos = qpos[0]
+            agent_proprio = qpos.float()
+        elif self.representation_space == "relative_ee_pose":
+            tcp_pose = obs['extra']['tcp_pose']
+            gripper_state = obs['agent']['qpos'][..., -2:]
+            if len(tcp_pose.shape) > 1:
+                tcp_pose = tcp_pose[0]
+                gripper_state = gripper_state[0]
+            agent_proprio = torch.cat([tcp_pose, gripper_state]).float()
+        return agent_proprio
 
     def _get_obs_dict(self, obs, step):
         obs_dict = {}
         
-        state = self._extract_state(obs)
-        obs_dict["agent_pos"] = state
+        agent_proprio = self._extract_agent_proprio(obs)
+        obs_dict["agent_proprio"] = agent_proprio
 
         gsplats = obs['sensor_data']['gsplats'][0, ...]
         N_total = gsplats.shape[0]
@@ -119,10 +132,10 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
         if step == 0 or (step + self.n_obs_steps - 1) % self.n_action_steps == 0:
             assert obs['sensor_data']['gsplats'].shape[0] == 1, "Sampling needs modification to work for batched environments!"
                 
-            # Extracting all active Gaussians in current timestep and doing farthest point sampling on top
+            # Extracting all active Gaussians in current timestep and doing sampling on top
             active_indices_global = torch.where(active_gaussians_mask)[0]
 
-            # *Random sampling* WITHOUT replacement using topk on random values
+            # Random sampling without replacement using topk on random values
             N_active = active_indices_global.shape[0]
             r = torch.rand(N_active, device=active_indices_global.device)
             _, topk_local = torch.topk(r, self.num_gaussians, largest=False)

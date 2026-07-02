@@ -1,12 +1,16 @@
 name: maniskill
 
+representation_space: relative_ee_pose     # abs_joint_pos | relative_ee_pose
+
 shape_meta: &shape_meta
   obs:
-    agent_pos:
-      shape: [9]
+    agent_proprio:
+      shape: 
+        - ${eval:'{"relative_ee_pose":11,"abs_joint_pos":9}["${task.representation_space}"]'}
       type: low_dim
   action:
-    shape: [8]
+    shape: 
+      - ${eval:'{"relative_ee_pose":10,"abs_joint_pos":8}["${task.representation_space}"]'}
 
 env_runner:
   eval_episodes: 20

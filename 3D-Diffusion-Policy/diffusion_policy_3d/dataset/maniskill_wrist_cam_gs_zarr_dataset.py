@@ -283,7 +283,7 @@ class WristCamGSManiskillDataset(BaseDataset):
     def _get_normalizer_abs_joint_pos(self):
         stats = {
             'action': {'min': None, 'max': None},
-            'agent_pos': {'min': None, 'max': None},
+            'agent_proprio': {'min': None, 'max': None},
         }
         if 'positions' in self.gs_params:
             stats['gs_positions'] = {'min': None, 'max': None}
@@ -322,7 +322,7 @@ class WristCamGSManiskillDataset(BaseDataset):
                 obs = torch_data['obs']
                 
                 update_min_max('action', torch_data['action'])
-                update_min_max('agent_pos', obs['agent_pos'])
+                update_min_max('agent_proprio', obs['agent_proprio'])
                 if 'positions' in self.gs_params:
                     update_min_max('gs_positions', obs['gs_positions'])
                 
@@ -403,8 +403,8 @@ class WristCamGSManiskillDataset(BaseDataset):
                 }
             )
 
-        # --- Actions and Agent Pos (separate normalization of each DOF as they have individual physical ranges!) ---
-        for key in ['action', 'agent_pos']:
+        # --- Actions and Agent Proprioception (separate normalization of each DOF as they have individual physical ranges!) ---
+        for key in ['action', 'agent_proprio']:
             k_min = stats[key]['min']
             k_max = stats[key]['max']
             k_scale = torch.clamp(k_max - k_min, min=1e-4) / 2.0
@@ -447,7 +447,7 @@ class WristCamGSManiskillDataset(BaseDataset):
         probe_sample['gsplats'] = self._get_synced_obs_slice(
             self.samplers[0].indices[0], self.gsplats_arrays[0], name="gsplats")
         probe_data = self._sample_to_data(probe_sample)
-        D_agent_pos = probe_data['obs']['agent_pos'].shape[-1]
+        D_agent_proprio = probe_data['obs']['agent_proprio'].shape[-1]
         D_action = probe_data['action'].shape[-1]
         D_gs_positions = 3
 
@@ -457,7 +457,7 @@ class WristCamGSManiskillDataset(BaseDataset):
         # For each (timestep, feature_dim), we store a list of sorted 1D tensors,
         # one per dataset. This avoids holding all raw samples in memory at once.
         # Layout: sorted_chunks[t][d] = [sorted_1d_tensor_from_ds0, sorted_1d_tensor_from_ds1, ...]
-        agent_pos_sorted_chunks = [[[] for _ in range(D_agent_pos)] for _ in range(T_obs)]
+        agent_proprio_sorted_chunks = [[[] for _ in range(D_agent_proprio)] for _ in range(T_obs)]
         action_sorted_chunks = [[[] for _ in range(D_action)] for _ in range(T_horizon)]
         gs_positions_sorted_chunks = [[[] for _ in range(D_gs_positions)] for _ in range(T_obs)]
 
@@ -473,7 +473,7 @@ class WristCamGSManiskillDataset(BaseDataset):
             )
 
             # Accumulate raw values for this single dataset
-            dataset_agent_pos_vals = []
+            dataset_agent_proprio_vals = []
             dataset_action_vals = []
             dataset_gs_positions_vals = []
             desc = f"Collecting stats from dataset {buf_i+1}/{len(self.replay_buffers)}"
@@ -487,22 +487,22 @@ class WristCamGSManiskillDataset(BaseDataset):
 
                 torch_data = self._sample_to_data(sample)
 
-                dataset_agent_pos_vals.append(torch_data['obs']['agent_pos'])        # (T_obs, D_agent_pos)
+                dataset_agent_proprio_vals.append(torch_data['obs']['agent_proprio'])        # (T_obs, D_agent_proprio)
                 dataset_action_vals.append(torch_data['action'])                     # (T_horizon, D_action)
                 dataset_gs_positions_vals.append(torch_data['obs']['gs_positions'])  # (T_obs, N_gaussians, 3)
 
-            if len(dataset_agent_pos_vals) == 0:
+            if len(dataset_agent_proprio_vals) == 0:
                 continue
 
             # Stack this dataset's samples, extract per (t, d), sort, and store
             # the compact sorted 1D tensors. Then delete the raw 
             # tensors to free memory before processing the next dataset.
-            agent_pos_stacked = torch.stack(dataset_agent_pos_vals, dim=0)  # (N_samples, T_obs, D_agent_pos)
+            agent_proprio_stacked = torch.stack(dataset_agent_proprio_vals, dim=0)  # (N_samples, T_obs, D_agent_proprio)
             for t in range(T_obs):
-                for d in range(D_agent_pos):
-                    agent_pos_sorted_chunks[t][d].append(
-                        agent_pos_stacked[:, t, d].contiguous().sort()[0])
-            del dataset_agent_pos_vals, agent_pos_stacked
+                for d in range(D_agent_proprio):
+                    agent_proprio_sorted_chunks[t][d].append(
+                        agent_proprio_stacked[:, t, d].contiguous().sort()[0])
+            del dataset_agent_proprio_vals, agent_proprio_stacked
 
             action_stacked = torch.stack(dataset_action_vals, dim=0)  # (N_samples, T_horizon, D_action)
             for t in range(T_horizon):
@@ -585,14 +585,14 @@ class WristCamGSManiskillDataset(BaseDataset):
         lower_percentile = 2
         upper_percentile = 98
 
-        # --- agent_pos ---
-        p02_agent_pos, p98_agent_pos = build_percentile_tensors(
-            agent_pos_sorted_chunks, T_obs, D_agent_pos, lower_percentile, upper_percentile)
-        normalizer['agent_pos'] = PerTimestepLinearNormalizer.create_clamped_percentile_normalizer(
-            p02=p02_agent_pos, p98=p98_agent_pos,
-            n_timesteps=T_obs, n_features=D_agent_pos,
+        # --- agent_proprio ---
+        p02_agent_proprio, p98_agent_proprio = build_percentile_tensors(
+            agent_proprio_sorted_chunks, T_obs, D_agent_proprio, lower_percentile, upper_percentile)
+        normalizer['agent_proprio'] = PerTimestepLinearNormalizer.create_clamped_percentile_normalizer(
+            p02=p02_agent_proprio, p98=p98_agent_proprio,
+            n_timesteps=T_obs, n_features=D_agent_proprio,
         )
-        del agent_pos_sorted_chunks
+        del agent_proprio_sorted_chunks
 
         # --- action ---
         p02_action, p98_action = build_percentile_tensors(
@@ -743,10 +743,10 @@ class WristCamGSManiskillDataset(BaseDataset):
             # =====================================================
             # Absolute joint position mode
             # =====================================================
-            agent_pos = torch.from_numpy(sample['state'])
+            agent_proprio = torch.from_numpy(sample['state'])
             action = torch.from_numpy(sample['action'])
             
-            obs_dict = {'agent_pos': agent_pos}
+            obs_dict = {'agent_proprio': agent_proprio}
             
             # Dynamically populate obs_dict based on gs_params layout
             gsplats_torch = torch.from_numpy(gsplats)
@@ -768,47 +768,43 @@ class WristCamGSManiskillDataset(BaseDataset):
             
             tcp_pose_horizon = sample['tcp_pose'].astype(np.float32)     # (horizon, 7)
             tcp_pose_obs = tcp_pose_horizon[:self.n_obs_steps]           # (n_obs_steps, 7)
-            state = sample['state'].astype(np.float32)                   # (n_obs_steps, 9)
+            qpos = sample['state'].astype(np.float32)                   # (n_obs_steps, 9)
             action_raw = sample['action'].astype(np.float32)             # (horizon, 8)
             gsplats = gsplats.astype(np.float32)                         # (n_obs_steps, N, D)
 
             # --- Anchor frame: TCP at the last observation step ---
-            anchor_tcp_to_base = _pose7_to_mat_np(tcp_pose_obs[-1])  # (4, 4)
-            anchor_base_to_tcp = np.linalg.inv(anchor_tcp_to_base)           # (4, 4)
+            T_anchor_tcp_to_base = _pose7_to_mat_np(tcp_pose_obs[-1])          # (4, 4)
+            T_anchor_base_to_tcp = np.linalg.inv(T_anchor_tcp_to_base)           # (4, 4)
+            R_anchor_base_to_tcp = T_anchor_base_to_tcp[:3, :3]                # (3, 3)
+            t_anchor_base_to_tcp = T_anchor_base_to_tcp[:3, 3]                 # (3,)
 
-            # --- 1. Transform GS observations into the anchor frame ---
-            # GS at each obs step i is already in EE(i) frame (from data collection).
-            # To express GS(i) in the anchor frame: T_rel = T_anchor^{-1} @ T_ee(i)
-            obs_tcp_to_base = _pose7_to_mat_np(tcp_pose_obs)       # (n_obs_steps, 4, 4)
-            T_rel_obs = anchor_base_to_tcp[None, :, :] @ obs_tcp_to_base   # (n_obs_steps, 4, 4)
-            R_rel_obs = T_rel_obs[:, :3, :3]                # (n_obs_steps, 3, 3)
-            t_rel_obs = T_rel_obs[:, :3, 3]                 # (n_obs_steps, 3)
-
-            # Transform positions: p_anchor = R_rel @ p_ee(i) + t_rel
+            # --- Transform GS observations into the anchor frame ---
+            # GS at each obs step i is in robot base frame (from data collection).
+            # To express GS(i) in the anchor frame: T_anchor_base_to_tcp @ GS(i)
+            
+            # Transform positions: p_anchor = R_anchor_base_to_tcp @ p_base(i) + t_anchor_base_to_tcp
             if 'positions' in self.param_slices:
                 s = self.param_slices['positions']
                 pos = gsplats[:, :, s]                            # (T_obs, N, 3)
-                R_T = R_rel_obs.transpose(0, 2, 1)                # (T_obs, 3, 3)
-                # Vectorized: (T_obs, N, 3) @ (T_obs, 3, 3) + (T_obs, 1, 3)
-                gsplats[:, :, s] = (pos @ R_T) + t_rel_obs[:, None, :]
+                # Vectorized: (T_obs, N, 3) @ (3, 3) + (3,)
+                gsplats[:, :, s] = (pos @ R_anchor_base_to_tcp.T) + t_anchor_base_to_tcp
 
-            # Transform 9D rotations: R_anchor = R_rel @ R_ee(i)
+            # Transform 9D rotations: R_anchor = R_anchor_base_to_tcp @ R_base(i)
             if 'rotations_9d' in self.param_slices:
-                # TODO: Better provide 6D rotations
+                # TODO: Better provide 6D rotations - then also change in env wrapper!
                 s = self.param_slices['rotations_9d']
                 rot9d = gsplats[:, :, s]                          # (T_obs, N, 9)
                 T_obs, N = rot9d.shape[:2]
                 rot_mats = rot9d.reshape(T_obs, N, 3, 3)         # (T_obs, N, 3, 3)
-                # (T_obs, 1, 3, 3) @ (T_obs, N, 3, 3)
-                rot_mats = R_rel_obs[:, None, :, :] @ rot_mats
+                # (3, 3) @ (T_obs, N, 3, 3)
+                rot_mats = R_anchor_base_to_tcp @ rot_mats
                 gsplats[:, :, s] = rot_mats.reshape(T_obs, N, 9)
 
-            # Transform surface normals: n_anchor = R_rel @ n_ee(i)
+            # Transform surface normals: n_anchor = R_anchor_base_to_tcp @ n_base(i)
             if 'surf_normals' in self.param_slices:
                 s = self.param_slices['surf_normals']
                 normals = gsplats[:, :, s]                        # (T_obs, N, 3)
-                R_T = R_rel_obs.transpose(0, 2, 1)                # (T_obs, 3, 3)
-                gsplats[:, :, s] = normals @ R_T
+                gsplats[:, :, s] = normals @ R_anchor_base_to_tcp.T
 
             # Populate obs_dict from transformed gsplats
             gsplats_torch = torch.from_numpy(gsplats)
@@ -821,19 +817,19 @@ class WristCamGSManiskillDataset(BaseDataset):
             if 'positions' in self.gs_params:
                 obs_dict['point_cloud'] = obs_dict[self.param_to_obs_key['positions']]
 
-            # --- 2. Proprioception: relative EE pose + gripper ---
+            # --- Proprioception: relative EE pose + gripper ---
             # pos(3) + rot6d(6) + gripper(2) = 11D per obs step
-            rel_obs_pose9d = _mat_to_pose9d_np(T_rel_obs)  # (n_obs_steps, 9)
-            # TODO: If we represent the gripper action in 1D, then a 1D state should also be fine? 
-            gripper_state = state[:, 7:9]                   # (n_obs_steps, 2)
-            # NOTE: using the absolute gripper state
-            agent_pos_np = np.concatenate([rel_obs_pose9d, gripper_state], axis=-1)  # (n_obs_steps, 11)
-            obs_dict['agent_pos'] = torch.from_numpy(agent_pos_np)
+            T_obs_tcp_to_base = _pose7_to_mat_np(tcp_pose_obs)       # (n_obs_steps, 4, 4)
+            T_relative_tcp = T_anchor_base_to_tcp[None, :, :] @ T_obs_tcp_to_base   # (n_obs_steps, 4, 4)
+            rel_tcp_pose9d = _mat_to_pose9d_np(T_relative_tcp)  # (n_obs_steps, 9) 
+            gripper_pos = qpos[:, -2:]                       # (n_obs_steps, 2), absolute gripper position
+            agent_proprio_np = np.concatenate([rel_tcp_pose9d, gripper_pos], axis=-1)  # (n_obs_steps, 11)
+            obs_dict['agent_proprio'] = torch.from_numpy(agent_proprio_np)
 
             # --- 3. Actions: relative EE pose + gripper ---
             # pos(3) + rot6d(6) + gripper(1) = 10D per action step
             full_horizon_tcp_to_base = _pose7_to_mat_np(tcp_pose_horizon)   # (horizon, 4, 4)
-            T_rel_action = anchor_base_to_tcp[None, :, :] @ full_horizon_tcp_to_base # (horizon, 4, 4)
+            T_rel_action = T_anchor_base_to_tcp[None, :, :] @ full_horizon_tcp_to_base # (horizon, 4, 4)
             rel_action_pose9d = _mat_to_pose9d_np(T_rel_action)  # (horizon, 9)
             # NOTE: using the absolute gripper action
             gripper_action = action_raw[:, -1:]                   # (horizon, 1)
@@ -971,7 +967,7 @@ if __name__ == "__main__":
         # The normalizer expects a dict with keys matching its params_dict
         test_dict = {
             'action': batch['action'],
-            'agent_pos': batch['obs']['agent_pos'],
+            'agent_proprio': batch['obs']['agent_proprio'],
         }
         if 'positions' in dataset.gs_params:
             test_dict['gs_positions'] = batch['obs']['gs_positions']

@@ -89,7 +89,7 @@ def stack_last_n_obs(all_obs, n_steps):
             result[:start_idx] = result[start_idx]
     elif isinstance(all_obs[0], torch.Tensor):
         result = torch.zeros((n_steps,) + all_obs[-1].shape, 
-            dtype=all_obs[-1].dtype)
+            dtype=all_obs[-1].dtype, device=all_obs[-1].device)
         start_idx = -min(n_steps, len(all_obs))
         result[start_idx:] = torch.stack(all_obs[start_idx:])
         if n_steps > len(all_obs):
@@ -118,7 +118,7 @@ class MultiStepWrapper(gym.Wrapper):
         self.n_obs_steps = n_obs_steps
 
         self.obs = deque(maxlen=n_obs_steps+1)
-        self.traj_agent_pos = deque(maxlen=max_episode_steps)
+        self.traj_agent_proprio = deque(maxlen=max_episode_steps)
         self.reward = list()
         self.done = list()
         self.info = defaultdict(lambda : deque(maxlen=n_obs_steps+1))
@@ -128,7 +128,7 @@ class MultiStepWrapper(gym.Wrapper):
         obs = super().reset(**kwargs)
 
         self.obs = deque([obs], maxlen=self.n_obs_steps+1)
-        self.traj_agent_pos = deque([obs['agent_pos']], maxlen=self.max_episode_steps)
+        self.traj_agent_proprio = deque([obs['agent_proprio']], maxlen=self.max_episode_steps)
         self.reward = list()
         self.done = list()
         self.info = defaultdict(lambda : deque(maxlen=self.n_obs_steps+1))
@@ -147,7 +147,7 @@ class MultiStepWrapper(gym.Wrapper):
             observation, reward, done, info = super().step(act)
 
             self.obs.append(observation)
-            self.traj_agent_pos.append(observation['agent_pos'])
+            self.traj_agent_proprio.append(observation['agent_proprio'])
             self.reward.append(reward)
             if (self.max_episode_steps is not None) \
                 and (len(self.reward) >= self.max_episode_steps):

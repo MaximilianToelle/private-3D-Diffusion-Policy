@@ -248,7 +248,7 @@ class PerTimestepLinearNormalizer(DictOfTensorMixin):
         params_dict = nn.ParameterDict({
             'scale': scale,                     # (T, D)
             'offset': offset,                   # (T, D)
-            'per_timestep': nn.Parameter(torch.tensor([True], dtype=torch.bool), requires_grad=False),     # flag
+            'per_timestep': nn.Parameter(torch.tensor([1.0], dtype=dtype)),     # flag
             'n_timesteps': torch.tensor([n_timesteps], dtype=dtype),
             'n_features': torch.tensor([n_features], dtype=dtype),
             'clamp_min': torch.tensor([clamp_min], dtype=dtype),

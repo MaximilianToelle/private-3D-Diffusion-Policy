@@ -41,7 +41,7 @@ class GaussianFPS:
             random_start_point=self.random_start_point
         )
         
-        keys_to_subsample = [k for k in obs.keys() if k not in ['agent_pos', 'gs_length']]
+        keys_to_subsample = [k for k in obs.keys() if k not in ['agent_proprio', 'gs_length']]
             
         # Apply indices across all features and time steps
         for key in keys_to_subsample:
@@ -91,7 +91,7 @@ class GaussianRandomSample:
         # topk(largest=False) returns K smallest values — i.e. K random valid indices
         _, sampled_indices = torch.topk(r, self.num_samples, dim=1, largest=False)
         
-        keys_to_subsample = [k for k in obs.keys() if k not in ['agent_pos', 'gs_length']]
+        keys_to_subsample = [k for k in obs.keys() if k not in ['agent_proprio', 'gs_length']]
             
         # Apply indices across all features and time steps
         for key in keys_to_subsample:
@@ -179,7 +179,7 @@ class GaussianFPSAndBallQuery:
         # Winners keep their proposed neighbor; losers fall back to their FPS centroid
         sampled_indices = torch.where(is_winner, proposed, centroid_idx)
         
-        keys_to_subsample = [k for k in obs.keys() if k not in ['agent_pos', 'gs_length']]
+        keys_to_subsample = [k for k in obs.keys() if k not in ['agent_proprio', 'gs_length']]
         
         # Apply indices across all features and time steps
         for key in keys_to_subsample:
@@ -205,6 +205,8 @@ class GaussianRobotPoseJitter:
     """
 
     def __init__(self, urdf_path, base_limit=0.005, wrist_limit=0.01):
+        raise NotImplementedError("Implementation is not feasible and not updated to latest obs keys")
+        
         self.urdf_path = urdf_path
         self.base_limit = base_limit
         self.wrist_limit = wrist_limit
@@ -275,14 +277,14 @@ class GaussianRobotPoseJitter:
             return batch
             
         obs = batch['obs']
-        if 'gs_semantics' not in obs or 'agent_pos' not in obs:
+        if 'gs_semantics' not in obs or 'agent_proprio' not in obs:
             print("Returning batch without GaussianRobotPoseJitter Augmentation")
             return batch
             
         B, T, N, _ = obs['gs_positions'].shape
         device = obs['gs_positions'].device
         
-        agent_qpos = obs['agent_pos'] # (B, T, 9)
+        agent_qpos = obs['agent_proprio'] # (B, T, 9)
         jittered_qpos = self.apply_capped_qpos_jitter(agent_qpos)
         
         # Pass through PK (batch size B*T)
@@ -342,7 +344,7 @@ class GaussianRobotPoseJitter:
                 # mask is (B, T, N, 1), unsqueeze to broadcast to (B, T, N, 3, 3)
                 obs['gs_rotations_9d'] = torch.where(mask.unsqueeze(-1), perturbed_rot, rot_3x3).view(B, T, N, 9).to(torch.float32)
                 
-        # Update agent_pos to the jittered one
-        obs['agent_pos'] = jittered_qpos.to(torch.float32)
+        # Update agent_proprio to the jittered one
+        obs['agent_proprio'] = jittered_qpos.to(torch.float32)
         
         return batch

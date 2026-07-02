@@ -263,7 +263,7 @@ class GSplatDP3Encoder(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        self.state_key = "agent_pos"
+        self.state_key = "agent_proprio"
         self.n_output_channels = out_channels
 
         self.state_shape = observation_space[self.state_key]

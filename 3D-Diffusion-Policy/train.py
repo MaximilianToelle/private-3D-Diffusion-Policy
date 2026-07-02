@@ -76,7 +76,7 @@ class TrainDP3Workspace:
         
         if cfg.training.debug:
             cfg.training.num_epochs = 3
-            cfg.training.max_train_steps = 200
+            cfg.training.max_train_steps = 10
             cfg.training.max_val_steps = 2
             cfg.training.rollout_every = 1
             cfg.training.checkpoint_every = 1
@@ -84,6 +84,8 @@ class TrainDP3Workspace:
             cfg.training.sample_every = 1
             RUN_ROLLOUT = True
             verbose = True
+            cfg.task.env_runner.eval_episodes = 2
+            cfg.task.dataset.max_train_episodes = 5
         else:
             RUN_ROLLOUT = True
             verbose = False

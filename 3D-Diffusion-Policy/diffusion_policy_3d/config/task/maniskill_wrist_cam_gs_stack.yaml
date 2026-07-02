@@ -4,8 +4,6 @@ defaults:
 
 name: maniskill_wrist_cam_gs_stack
 
-representation_space: relative_ee_pose     # abs_joint_pos | relative_ee_pose
-
 env_runner:
   _target_: diffusion_policy_3d.env_runner.maniskill_wrist_cam_gs_runner.WristCamGSManiSkillRunner
   task_name: StackFr3WristCamSimpleEnv-v1

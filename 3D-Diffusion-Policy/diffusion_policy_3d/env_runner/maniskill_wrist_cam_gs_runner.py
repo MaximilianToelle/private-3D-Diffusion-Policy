@@ -7,10 +7,11 @@ import time
 import os
 import imageio
 
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
-import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import cv2
 
@@ -20,6 +21,7 @@ from arguments import PipelineParams
 import gymnasium
 
 from diffusion_policy_3d.env.maniskill.maniskill_wrist_cam_gs_wrapper import WristCamGSManiskillDP3Wrapper
+from diffusion_policy_3d.env.maniskill.relative_ee_control_wrapper import RelativeEEControlWrapper
 from diffusion_policy_3d.gym_util.multistep_wrapper import MultiStepWrapper
 from diffusion_policy_3d.gym_util.video_recording_wrapper import SimpleVideoRecordingWrapper
 
@@ -56,7 +58,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
                 task_name, 
                 robot_uids="fr3_umi_wrist435_modified",
                 obs_mode="rgb+depth+segmentation",
-                control_mode="pd_joint_pos",
+                control_mode="pd_ee_pose" if representation_space == "relative_ee_pose" else "pd_joint_pos",
                 num_envs=n_envs,
                 max_episode_steps=max_steps,
                 sim_backend="gpu",
@@ -71,13 +73,13 @@ class WristCamGSManiSkillRunner(BaseRunner):
                 scene_gs_cfg_name=scene_gs_cfg_name, 
                 device=device, 
                 use_gsplat_viewer=use_gsplat_viewer,
-                obs_frame="tcp" if representation_space == "relative_ee_pose" else "world",
             )
             
-            return MultiStepWrapper(
+            wrapped_env = MultiStepWrapper(
                 SimpleVideoRecordingWrapper(
                     WristCamGSManiskillDP3Wrapper(
                         mapped_env, 
+                        representation_space,
                         num_gaussians=num_gaussians,
                         n_action_steps=n_action_steps,
                         n_obs_steps=n_obs_steps,
@@ -88,6 +90,11 @@ class WristCamGSManiSkillRunner(BaseRunner):
                 max_episode_steps=max_steps,
                 reward_agg_method='sum',
             )
+            
+            if representation_space == "relative_ee_pose":
+                wrapped_env = RelativeEEControlWrapper(wrapped_env)
+                
+            return wrapped_env
 
         self.eval_episodes = eval_episodes
         self.env = env_fn(self.task_name)
@@ -145,7 +152,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
                     obs_dict_input['gs_log_scales'] = obs_dict['gs_log_scales'].unsqueeze(0)
                     obs_dict_input['gs_opacities'] = obs_dict['gs_opacities'].unsqueeze(0)
                     obs_dict_input['gs_rgb'] = obs_dict['gs_rgb'].unsqueeze(0)
-                    obs_dict_input['agent_pos'] = obs_dict['agent_pos'].unsqueeze(0)
+                    obs_dict_input['agent_proprio'] = obs_dict['agent_proprio'].unsqueeze(0)
                     
                     action_dict = policy.predict_action(obs_dict_input)
 
@@ -189,7 +196,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
                     is_success = is_success or s
 
             all_expert_trajectories.append(expert_q_sequence)
-            all_policy_trajectories.append(torch.stack(list(env.traj_agent_pos)).cpu().numpy())
+            all_policy_trajectories.append(torch.stack(list(env.traj_agent_proprio)).cpu().numpy())
             all_predicted_actions.append(np.array(current_predicted_actions))
             all_num_unique_gaussians.append(np.array(current_num_unique_gaussians))
 
