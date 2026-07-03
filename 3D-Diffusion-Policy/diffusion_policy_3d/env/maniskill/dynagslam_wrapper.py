@@ -6,11 +6,11 @@ import copy
 from typing import Optional
 
 # DynaGSLAM internals
-from scene.cameras import Camera
-from SLAM.multiprocess.mapper_dyna_eval_sam_keti import Mapping
-from SLAM.multiprocess.tracker import Tracker
-from SLAM.utils import move_to_gpu, move_to_cpu
-from utils.graphics_utils import fov2focal
+from dynagslam.scene.cameras import Camera
+from dynagslam.SLAM.multiprocess.mapper_dyna_eval_sam_keti import Mapping
+from dynagslam.SLAM.multiprocess.tracker import Tracker
+from dynagslam.SLAM.utils import move_to_gpu, move_to_cpu
+from dynagslam.utils.graphics_utils import fov2focal
 
 
 SH_C0 = 0.28209479177387814  # zeroth SH band coefficient

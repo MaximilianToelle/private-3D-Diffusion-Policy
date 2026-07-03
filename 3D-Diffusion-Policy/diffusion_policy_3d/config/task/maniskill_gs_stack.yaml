@@ -1,48 +1,8 @@
 defaults:
-  - maniskill_base   
+  - maniskill_gs   
   - _self_           
 
-
 name: maniskill_gs_stack
-num_gaussians: 1024
-
-shape_meta: &shape_meta
-  obs:
-    gs_positions:
-      shape: 
-        - ${task.num_gaussians}
-        - 3
-      type: spatial
-    point_cloud:          # for running dp3 on gsplat means
-      shape: 
-        - ${task.num_gaussians}
-        - 3
-      type: spatial
-    gs_rotations_9d:
-      shape: 
-        - ${task.num_gaussians}
-        - 9
-      type: spatial
-    gs_surface_normals:   # trying to use surface normals instead of rotation matrices
-      shape: 
-        - ${task.num_gaussians}
-        - 3
-      type: spatial
-    gs_log_scales:
-      shape: 
-        - ${task.num_gaussians}
-        - 3
-      type: spatial
-    gs_opacities:
-      shape: 
-        - ${task.num_gaussians}
-        - 1
-      type: spatial
-    gs_rgb:
-      shape: 
-        - ${task.num_gaussians}
-        - 3
-      type: spatial 
 
 env_runner:
   _target_: diffusion_policy_3d.env_runner.maniskill_gs_runner.GSManiSkillRunner
