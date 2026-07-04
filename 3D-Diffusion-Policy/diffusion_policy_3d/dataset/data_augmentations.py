@@ -90,6 +90,8 @@ class HighOpacityActiveGaussianRandomSampling:
             high_opacity_gs_mask = (opacities >= self.min_opacity).squeeze(-1)
             valid_mask &= high_opacity_gs_mask
             del obs['gs_opacities']
+        else:
+            raise KeyError("Key 'gs_opacities' is missing from observations, which is required for HighOpacityActiveGaussianRandomSampling.")
 
         if 'gs_active_gaussians_mask' in obs:
             # Shape is (B, T, N, 1). Take min over T to see if it's active over the full observation window
@@ -99,6 +101,9 @@ class HighOpacityActiveGaussianRandomSampling:
             is_active_all_time = (active_mask > 0.5).squeeze(-1)
             valid_mask &= is_active_all_time
             del obs['gs_active_gaussians_mask']
+        else:
+            raise KeyError("Key 'gs_active_gaussians_mask' is missing from observations, which is required for HighOpacityActiveGaussianRandomSampling.")
+            
         
         # Push invalid Gaussians to the back
         r[~valid_mask] = 2.0 
