@@ -5,6 +5,7 @@ defaults:
 
 name: maniskill_gs_stack
 num_gaussians: 1024
+min_opacity: 0.9
 
 shape_meta: &shape_meta
   obs:
@@ -48,10 +49,30 @@ env_runner:
   _target_: diffusion_policy_3d.env_runner.maniskill_gs_runner.GSManiSkillRunner
   task_name: StackFr3Env-v1
   num_gaussians: ${task.num_gaussians}
+  min_opacity: ${task.min_opacity}
   use_gsplat_viewer: false
   scene_gs_cfg_name: "fr3_stack_with_normals"
+  representation_space: ${task.representation_space}
 
 dataset:
   _target_: diffusion_policy_3d.dataset.maniskill_gs_dataset.GSManiskillDataset
   zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack
-  num_gaussians: ${task.num_gaussians}
+  representation_space: ${task.representation_space}
+
+train_data_augmentations:
+  - _target_: diffusion_policy_3d.dataset.data_augmentations.HighOpacityActiveGaussianRandomSampling
+    num_samples: ${task.num_gaussians}
+    min_opacity: ${task.min_opacity}
+  # - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianFPSAndBallQuery
+  #   num_samples: ${task.num_gaussians}
+  #   random_start_point: True
+  #   radius: 0.01
+  #   max_neighbors: 128
+
+val_data_augmentations:
+  - _target_: diffusion_policy_3d.dataset.data_augmentations.HighOpacityActiveGaussianRandomSampling
+    num_samples: ${task.num_gaussians}
+    min_opacity: ${task.min_opacity}
+  # - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianFPS
+  #   num_samples: ${task.num_gaussians}
+  #   random_start_point: False

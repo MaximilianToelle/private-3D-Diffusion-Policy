@@ -7,13 +7,12 @@ name: maniskill_wrist_cam_gs_stack
 env_runner:
   _target_: diffusion_policy_3d.env_runner.maniskill_wrist_cam_gs_runner.WristCamGSManiSkillRunner
   task_name: StackFr3WristCamSimpleEnv-v1
-  representation_space: ${task.representation_space}
 
 dataset:
   _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_zarr_dataset.WristCamGSManiskillDataset
   # --- Three ways to specify datasets ---
   # 1. Single zarr path (has .zgroup inside):
-  zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_1_obs_in_tcp_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
+  zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_1_with_tcp_positions_surf_normals_opacities_active_gaussians_mask_semantics
   # 2. Parent directory (all zarr children auto-discovered):
   # zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_all
   # 3. Explicit list:
@@ -28,20 +27,3 @@ dataset:
     # - /home/toelle/Projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_8_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
     # - /home/toelle/Projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_9_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
     # - /home/toelle/Projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_10_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
-  representation_space: ${task.representation_space}
-
-train_augmentations:
-  - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianRandomSample
-    num_samples: ${task.dataset.num_gaussians}
-  # - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianFPSAndBallQuery
-  #   num_samples: ${task.dataset.num_gaussians}
-  #   random_start_point: True
-  #   radius: 0.01
-  #   max_neighbors: 128
-
-eval_augmentations:
-  - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianRandomSample
-    num_samples: ${task.dataset.num_gaussians}
-  # - _target_: diffusion_policy_3d.dataset.data_augmentations.GaussianFPS
-  #   num_samples: ${task.dataset.num_gaussians}
-  #   random_start_point: False

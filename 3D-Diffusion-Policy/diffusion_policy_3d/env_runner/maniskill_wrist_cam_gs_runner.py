@@ -1,10 +1,12 @@
 
 import torch
+import torch.nn as nn
 import numpy as np
 import tqdm
 import argparse
 import time
 import os
+from typing import Dict
 import imageio
 
 import matplotlib
@@ -45,12 +47,16 @@ class WristCamGSManiSkillRunner(BaseRunner):
                  task_name=None,
                  device="cuda:0",
                  num_gaussians=1024,
+                 min_opacity=0.9,
                  use_gsplat_viewer=False,
                  scene_gs_cfg_name="fr3_stack",
                  representation_space="relative_ee_pose",
                  ):
         super().__init__(output_dir)
         self.task_name = task_name
+        assert representation_space in ("abs_joint_pos", "relative_ee_pose"), \
+            f"representation_space must be 'abs_joint_pos' or 'relative_ee_pose', got '{representation_space}'"
+        self.representation_space = representation_space
 
         def env_fn(task_name):
             # Typically ManiSkill environments match task boundaries. Custom params should mirror run_with_gs.
@@ -81,6 +87,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
                         mapped_env, 
                         representation_space,
                         num_gaussians=num_gaussians,
+                        min_opacity=min_opacity,
                         n_action_steps=n_action_steps,
                         n_obs_steps=n_obs_steps,
                     )
@@ -555,3 +562,86 @@ def add_legend_to_video(video_frames, colormap='cool'):
     
     # Concatenate vertically
     return np.concatenate([video_frames, colorbar_video], axis=1)
+
+
+class DummyExtractor:
+    def __init__(self):
+        self._latest_pool_indices = torch.zeros(1024, dtype=torch.long)
+
+
+class DummyEncoder:
+    def __init__(self):
+        self.extractor = DummyExtractor()
+
+
+class DummyPolicy(nn.Module):
+    def __init__(self, action_dim=7, action_steps=8, device="cuda:0"):
+        super().__init__()
+        self._device = torch.device(device)
+        self.action_dim = action_dim
+        self.action_steps = action_steps
+        self.obs_encoder = DummyEncoder()
+    
+    @property
+    def device(self):
+        return self._device
+        
+    def reset(self):
+        pass
+        
+    def eval(self):
+        pass
+        
+    def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        B = obs_dict['gs_positions'].shape[0]
+        N = obs_dict['gs_positions'].shape[2]
+
+        # Dynamically set dummy indices on GPU
+        self.obs_encoder.extractor._latest_pool_indices = torch.arange(N, dtype=torch.long, device=self.device)
+
+        # Return random dummy actions for sequence
+        action = torch.rand((B, self.action_steps, self.action_dim), device=self.device)
+        return {'action': action}
+
+
+if __name__ == "__main__":
+    import hydra
+    import sys
+    from omegaconf import OmegaConf
+
+    OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+    # Set default task for this runner script if not passed
+    if not any(arg.startswith("task=") for arg in sys.argv):
+        sys.argv.append("task=maniskill_wrist_cam_gs_stack")
+
+    @hydra.main(
+        version_base=None,
+        config_path="../config",
+        config_name="wrist_cam_gsplat_dp3"
+    )
+    def main(cfg):
+        device = "cuda:0"
+        output_dir = "test_eval_output"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # configure env
+        env_runner: BaseRunner
+        env_runner = hydra.utils.instantiate(
+            cfg.task.env_runner,
+            output_dir=output_dir)
+
+        if env_runner is not None:
+            assert isinstance(env_runner, BaseRunner)
+
+        action_dim = 8 if env_runner.representation_space == "pd_joint_pos" else 10
+        policy = DummyPolicy(
+            action_dim=action_dim,
+            action_steps=8,
+            device=device
+        )
+
+        runner_log_train = env_runner.run(policy)
+        print("Log data:", runner_log_train)
+        
+    main()

@@ -11,7 +11,7 @@ from pytorch3d.ops import sample_farthest_points
 class WristCamGSManiskillDP3Wrapper(gym.Env):
     """
     Wrapper that expects its underlying environment to be a `WristCamGSWorldWrapper`.
-    - Specific sampling strategy to account for newly active Gaussians over time
+    - Eliminating all non active and low opacity Gaussians during downsampling
     """
 
     def __init__(
@@ -19,6 +19,7 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
         env, 
         representation_space,
         num_gaussians=1024, 
+        min_opacity=0.9,
         n_action_steps=8,
         n_obs_steps=2,
     ):
@@ -28,6 +29,7 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
             f"representation_space must be 'abs_joint_pos' or 'relative_ee_pose', got '{representation_space}'"
         self.representation_space = representation_space
         self.num_gaussians = num_gaussians
+        self.min_opacity=min_opacity
         self.n_action_steps = n_action_steps
         self.n_obs_steps = n_obs_steps
 
@@ -115,7 +117,7 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
         N_total = gsplats.shape[0]
 
         # --- Track newly-active Gaussians ---
-        active_gaussians_mask = obs['sensor_data']['gsplats'][0, :, 19].to(torch.bool)
+        active_gaussians_mask = gsplats[:, 19].to(torch.bool)
 
         if self.prev_active_mask is None:
             # t=0: all currently active Gaussians are newly active
@@ -131,15 +133,19 @@ class WristCamGSManiskillDP3Wrapper(gym.Env):
         # NOTE: Such a high-frequent resampling represents the extreme case
         if step == 0 or (step + self.n_obs_steps - 1) % self.n_action_steps == 0:
             assert obs['sensor_data']['gsplats'].shape[0] == 1, "Sampling needs modification to work for batched environments!"
-                
-            # Extracting all active Gaussians in current timestep and doing sampling on top
-            active_indices_global = torch.where(active_gaussians_mask)[0]
+
+            # TODO: torch.where does not work as soon as we introduce batched evaluation  
+            # Extracting all active and high opacity Gaussians in current timestep and doing sampling on top
+            high_opacity_mask = (gsplats[:, 15] >= self.min_opacity)
+            filter_mask = (active_gaussians_mask & high_opacity_mask)
+            filtered_indices_global = torch.where(filter_mask)[0]
 
             # Random sampling without replacement using topk on random values
-            N_active = active_indices_global.shape[0]
-            r = torch.rand(N_active, device=active_indices_global.device)
-            _, topk_local = torch.topk(r, self.num_gaussians, largest=False)
-            self.gaussian_indices = active_indices_global[topk_local]
+            N_filtered = filtered_indices_global.shape[0]
+            assert (N_filtered >= self.num_gaussians), "Not enough Gaussians for random sampling!"
+            r = torch.rand(N_filtered, device=filtered_indices_global.device)
+            _, topk_indices = torch.topk(r, self.num_gaussians, largest=False)
+            self.gaussian_indices = filtered_indices_global[topk_indices]
             
             # # FPS sampling (commented out in favor of random sampling)
             # active_pts_xyz = gsplats[active_indices_global, :3].unsqueeze(0)

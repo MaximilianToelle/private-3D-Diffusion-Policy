@@ -57,41 +57,58 @@ class GaussianFPS:
         return batch
 
 
-class GaussianRandomSample:
+class HighOpacityActiveGaussianRandomSampling:
     """
-    Randomly samples num_samples Gaussians on the GPU for each sequence in a batch.
+    Filters out all non-active and low-opacity Gaussians.  
+    Randomly samples num_samples of the remaining Gaussians on the GPU for each sequence in a batch.
+    
     Ensures that only valid (non-padded) Gaussians are sampled using the lengths tensor (gs_length).
     The sampled indices are applied consistently across all timesteps and features.
     """
-    def __init__(self, num_samples=1024):
+    def __init__(self, num_samples=1024, min_opacity=0.9):
         self.num_samples = num_samples
+        self.min_opacity = min_opacity
+
+        self.keys_not_to_subsample = ['agent_proprio', 'gs_length']
 
     def __call__(self, batch):
         obs = batch['obs']
         B, T, N, _ = obs['gs_positions'].shape
         device = obs['gs_positions'].device
-        
-        # lengths = obs.get('gs_length', None)
-        # if 'gs_length' in obs:
-        #     del batch['obs']['gs_length']
 
         # Random sampling WITHOUT replacement using partial sort via topk
         r = torch.rand(B, N, device=device)
         
-        # if lengths is not None:
-        #     # Push padded indices to the back so they are never selected
-        #     mask = torch.arange(N, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
-        #     r[mask] = 2.0  # any value > 1.0 ensures padded points lose to valid ones
-            
+        # Initialize an all-True mask of shape (B, N)
+        valid_mask = torch.ones(B, N, dtype=torch.bool, device=device)
+        
+        if 'gs_opacities' in obs:
+            # Handle potential time dimension T in gs_opacities (e.g. B, T, N, 1 or B, N, 1)
+            opacities = obs['gs_opacities']
+            if opacities.dim() == 4:
+                opacities = opacities.min(dim=1)[0]  # Min over time
+            high_opacity_gs_mask = (opacities >= self.min_opacity).squeeze(-1)
+            valid_mask &= high_opacity_gs_mask
+            del obs['gs_opacities']
+
         if 'gs_active_gaussians_mask' in obs:
             # Shape is (B, T, N, 1). Take min over T to see if it's active over the full observation window
-            is_active_all_time = obs['gs_active_gaussians_mask'].min(dim=1)[0].squeeze(-1) > 0.5
-            r[~is_active_all_time] = 2.0  # Push inactive points to the back
-            
+            active_mask = obs['gs_active_gaussians_mask']
+            if active_mask.dim() == 4:
+                active_mask = active_mask.min(dim=1)[0]
+            is_active_all_time = (active_mask > 0.5).squeeze(-1)
+            valid_mask &= is_active_all_time
+            del obs['gs_active_gaussians_mask']
+        
+        # Push invalid Gaussians to the back
+        r[~valid_mask] = 2.0 
+        
+        assert (valid_mask.sum(dim=1) >= self.num_samples).all(), "Not enough valid Gaussians to sample from!"
+
         # topk(largest=False) returns K smallest values — i.e. K random valid indices
         _, sampled_indices = torch.topk(r, self.num_samples, dim=1, largest=False)
         
-        keys_to_subsample = [k for k in obs.keys() if k not in ['agent_proprio', 'gs_length']]
+        keys_to_subsample = [k for k in obs.keys() if k not in self.keys_not_to_subsample]
             
         # Apply indices across all features and time steps
         for key in keys_to_subsample:

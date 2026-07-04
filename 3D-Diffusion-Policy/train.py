@@ -114,15 +114,15 @@ class TrainDP3Workspace:
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
 
         # configure GPU augmentations
-        if 'train_augmentations' in cfg.task and cfg.task.train_augmentations is not None:
-            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.train_augmentations]
-            self.train_augmentations = GaussianCompose(augmentations)
+        if 'train_data_augmentations' in cfg.task and cfg.task.train_data_augmentations is not None:
+            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.train_data_augmentations]
+            self.train_data_augmentations = GaussianCompose(augmentations)
         else:
             raise ValueError("Train data augmentations must be explicitly provided in the dataset config!")
             
-        if 'eval_augmentations' in cfg.task and cfg.task.eval_augmentations is not None:
-            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.eval_augmentations]
-            self.eval_augmentations = GaussianCompose(augmentations)
+        if 'val_data_augmentations' in cfg.task and cfg.task.val_data_augmentations is not None:
+            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.val_data_augmentations]
+            self.val_data_augmentations = GaussianCompose(augmentations)
         else:
             raise ValueError("Eval data augmentations must be explicitly provided in the dataset config!")
 
@@ -201,7 +201,7 @@ class TrainDP3Workspace:
         sample_indices = torch.randint(len(dataset), (cfg.dataloader.batch_size,)).tolist()
         train_sampling_batch = torch.utils.data.default_collate([dataset[i] for i in sample_indices])
         train_sampling_batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
-        train_sampling_batch = self.train_augmentations(train_sampling_batch)
+        train_sampling_batch = self.train_data_augmentations(train_sampling_batch)
 
         # training loop
         for _ in range(self.epoch, cfg.training.num_epochs):
@@ -220,7 +220,7 @@ class TrainDP3Workspace:
                     t1_1 = time.time()
 
                     # augmentations
-                    batch = self.train_augmentations(batch)
+                    batch = self.train_data_augmentations(batch)
                     t1_2 = time.time()
                     
                     # compute loss
@@ -335,7 +335,7 @@ class TrainDP3Workspace:
                             leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                         for batch_idx, batch in enumerate(tepoch):
                             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                            batch = self.eval_augmentations(batch)
+                            batch = self.val_data_augmentations(batch)
                             
                             loss, loss_dict = policy.compute_loss(batch)
 

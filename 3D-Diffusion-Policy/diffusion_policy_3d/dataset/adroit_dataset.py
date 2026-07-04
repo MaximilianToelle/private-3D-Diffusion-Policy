@@ -121,9 +121,9 @@ if __name__ == "__main__":
         
         device = torch.device(cfg.training.device)
 
-        if 'train_augmentations' in cfg.task and cfg.task.train_augmentations is not None:
-            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.train_augmentations]
-            train_augmentations = GaussianCompose(augmentations)
+        if 'train_data_augmentations' in cfg.task and cfg.task.train_data_augmentations is not None:
+            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.train_data_augmentations]
+            train_data_augmentations = GaussianCompose(augmentations)
 
         for epoch in range(num_epochs):
             print(f"\n--- Epoch {epoch + 1}/{num_epochs} ---")
@@ -139,8 +139,8 @@ if __name__ == "__main__":
                     t1_1 = time.time()
 
                     # augmentations
-                    if 'train_augmentations' in cfg.task and cfg.task.train_augmentations is not None:
-                        batch = train_augmentations(batch)
+                    if 'train_data_augmentations' in cfg.task and cfg.task.train_data_augmentations is not None:
+                        batch = train_data_augmentations(batch)
                     t1_2 = time.time()
 
                     print(f" batch generation time {t1-t_before_next_batch:.3f}")

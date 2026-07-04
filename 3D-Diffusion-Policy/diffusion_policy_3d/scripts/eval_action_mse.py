@@ -70,9 +70,9 @@ def evaluate_action_mse(checkpoint_path: str, dataset_path: str,
     cprint(f"Training episodes: {np.nonzero(dataset.global_train_mask)[0].tolist()}", "cyan")
 
     # ── Configure augmentations (train augmentations to model training distribution) ──
-    if 'train_augmentations' in cfg.task and cfg.task.train_augmentations is not None:
-        augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.train_augmentations]
-        train_augmentations = GaussianCompose(augmentations)
+    if 'train_data_augmentations' in cfg.task and cfg.task.train_data_augmentations is not None:
+        augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.train_data_augmentations]
+        train_data_augmentations = GaussianCompose(augmentations)
     else:
         raise ValueError("Train data augmentations must be explicitly provided in the dataset config!")
 
@@ -96,7 +96,7 @@ def evaluate_action_mse(checkpoint_path: str, dataset_path: str,
             sample_indices = torch.randint(len(dataset), (batch_size,)).tolist()
             batch = torch.utils.data.default_collate([dataset[i] for i in sample_indices])
             batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-            batch = train_augmentations(batch)
+            batch = train_data_augmentations(batch)
 
             obs_dict = batch['obs']
             gt_action = batch['action']
