@@ -6,11 +6,19 @@ import copy
 from typing import Optional
 
 # DynaGSLAM internals
+<<<<<<< HEAD
 from scene.cameras import Camera
 from SLAM.multiprocess.mapper_dyna_eval_sam_keti import Mapping
 from SLAM.multiprocess.tracker import Tracker
 from SLAM.utils import move_to_gpu, move_to_cpu
 from utils.graphics_utils import fov2focal
+=======
+from dynagslam.scene.cameras import Camera
+from dynagslam.SLAM.multiprocess.mapper_dyna_eval_sam_keti import Mapping
+from dynagslam.SLAM.multiprocess.tracker import Tracker
+from dynagslam.SLAM.utils import move_to_gpu, move_to_cpu
+from dynagslam.utils.graphics_utils import fov2focal
+>>>>>>> origin/PixiPwr
 
 
 SH_C0 = 0.28209479177387814  # zeroth SH band coefficient
@@ -214,9 +222,26 @@ class DynaGSLAMWrapper(gym.Env):
         (SAPIEN assigns 0 to the background table / floor and positive
         IDs to actors and robot links). Tune this for your specific task.
         """
+<<<<<<< HEAD
         seg = obs['sensor_data'][self.cam_name]['segmentation']  # (B, H, W, 1) int16 / int32
         seg_2d = seg[0, :, :, 0].cpu().numpy()                  # (H, W)
         dynamic_mask = (seg_2d > 0).astype(np.uint8)
+=======
+        ##seg = obs['sensor_data'][self.cam_name]['segmentation']  # (B, H, W, 1) int16 / int32
+        ##seg_2d = seg[0, :, :, 0].cpu().numpy()                  # (H, W)
+        ##dynamic_mask = (seg_2d > 0).astype(np.uint8)
+        ##return dynamic_mask
+        seg = obs['sensor_data'][self.cam_name]['segmentation']       # (B, H, W, 1)
+        seg_2d = seg[0, :, :, 0].cpu().numpy()                          # (H, W)
+
+        id_map = env.unwrapped.segmentation_id_map
+        movable_ids = {
+        obj_id for obj_id, obj in id_map.items()
+        if isinstance(obj, Link) or getattr(obj, "px_body_type", None) == "dynamic"
+        }
+
+        dynamic_mask = np.isin(seg_2d, list(movable_ids)).astype(np.uint8)
+>>>>>>> origin/PixiPwr
         return dynamic_mask
 
     def _run_slam_step(self, obs: dict):

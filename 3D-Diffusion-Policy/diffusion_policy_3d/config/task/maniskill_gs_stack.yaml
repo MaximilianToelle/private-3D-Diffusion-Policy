@@ -1,9 +1,9 @@
 defaults:
-  - maniskill_base   
+  - maniskill_gs   
   - _self_           
 
-
 name: maniskill_gs_stack
+<<<<<<< HEAD
 num_gaussians: 1024
 min_opacity: 0.9
 
@@ -44,6 +44,8 @@ shape_meta: &shape_meta
         - ${task.num_gaussians}
         - 3
       type: spatial 
+=======
+>>>>>>> origin/PixiPwr
 
 env_runner:
   _target_: diffusion_policy_3d.env_runner.maniskill_gs_runner.GSManiSkillRunner
