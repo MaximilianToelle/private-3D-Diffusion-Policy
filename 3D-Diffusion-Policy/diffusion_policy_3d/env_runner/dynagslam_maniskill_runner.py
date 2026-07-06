@@ -1,24 +1,12 @@
 
 import torch
-<<<<<<< HEAD
-=======
 from typing import Dict
 import torch.nn as nn
->>>>>>> origin/PixiPwr
 import numpy as np
 import tqdm
 import os
 import imageio
 import gymnasium
-<<<<<<< HEAD
-
-# DynaGSLAM config / params
-from argparse import ArgumentParser
-from utils.config_utils import read_config
-from arguments import MapParams, OptimizationParams
-
-from diffusion_policy_3d.env.maniskill.online_gsplat_wrapper import DynaGSLAMWrapper
-=======
 import gsworld      # for gym env registration
 
 # DynaGSLAM config / params
@@ -27,7 +15,6 @@ import gsworld      # for gym env registration
 # from arguments import MapParams, OptimizationParams
 
 from diffusion_policy_3d.env.maniskill.dynagslam_wrapper import DynaGSLAMWrapper
->>>>>>> origin/PixiPwr
 from diffusion_policy_3d.gym_util.multistep_wrapper import MultiStepWrapper
 from diffusion_policy_3d.gym_util.video_recording_wrapper import SimpleVideoRecordingWrapper
 
@@ -41,10 +28,7 @@ from termcolor import cprint
 class DynaGSLAMManiSkillRunner(BaseRunner):
     def __init__(self,
                  output_dir,
-<<<<<<< HEAD
-=======
                  dynagslam_config,
->>>>>>> origin/PixiPwr
                  eval_episodes=20,
                  max_steps=1000,
                  n_obs_steps=8,
@@ -56,40 +40,20 @@ class DynaGSLAMManiSkillRunner(BaseRunner):
                  device="cuda:0",
                  num_gaussians=1024,
                  use_gsplat_viewer=False,
-<<<<<<< HEAD
-                 slam_config_path: str = None,   # path to a DynaGSLAM YAML config
-                 cam_name: str = "right_cam",    # which ManiSkill camera to feed SLAM
-=======
                  cam_name: str = "right_cam",    # which ManiSkill camera to feed SLAM
                  representation_space="relative_ee_pose",
->>>>>>> origin/PixiPwr
                  ):
         super().__init__(output_dir)
         self.task_name = task_name
 
         # --- Load DynaGSLAM args from config file --------------------------------
-<<<<<<< HEAD
-        if slam_config_path is None:
-            raise ValueError("slam_config_path must be provided for OnlineGSManiSkillRunner")
-        slam_args = read_config(slam_config_path)
-=======
         # if slam_config_path is None:
         #     raise ValueError("slam_config_path must be provided for OnlineGSManiSkillRunner")
         # slam_args = read_config(slam_config_path)
->>>>>>> origin/PixiPwr
 
         # Enforce sim-compatible settings:
         #   • use_gt_pose=True  → skip ORB/ICP tracker, use sim camera extrinsics
         #   • mode='single process' → no multiprocessing overhead
-<<<<<<< HEAD
-        slam_args.use_gt_pose = True
-        slam_args.mode = "single process"
-
-        parser = ArgumentParser()
-        _map_params = MapParams(parser)
-        optimization_params = OptimizationParams(parser)
-        optimization_params = optimization_params.extract(slam_args)
-=======
         # slam_args.use_gt_pose = True
         # slam_args.mode = "single process"
 
@@ -97,21 +61,14 @@ class DynaGSLAMManiSkillRunner(BaseRunner):
         # _map_params = MapParams(parser)
         # optimization_params = OptimizationParams(parser)
         # optimization_params = optimization_params.extract(slam_args)
->>>>>>> origin/PixiPwr
         # -------------------------------------------------------------------------
 
         def env_fn(task_name):
             base_env = gymnasium.make(
                 task_name,
-<<<<<<< HEAD
-                robot_uids="fr3_umi",
-                obs_mode="rgb+depth+segmentation",
-                control_mode="pd_joint_pos",
-=======
                 robot_uids="fr3_umi_wrist435_modified",
                 obs_mode="rgb+depth+segmentation",
                 control_mode="pd_joint_pos", # "pd_ee_pose" if representation_space == "relative_ee_pose" else "pd_joint_pos",
->>>>>>> origin/PixiPwr
                 num_envs=n_envs,
                 max_episode_steps=max_steps,
                 sim_backend="gpu",
@@ -246,8 +203,6 @@ class DynaGSLAMManiSkillRunner(BaseRunner):
         }
         cprint(f"mean_success_rates: {_mean(all_success_rates)}", 'green')
         return log_data
-<<<<<<< HEAD
-=======
 
 
 class DummyPolicy(nn.Module):
@@ -315,4 +270,3 @@ if __name__ == "__main__":
         print("Log data:", runner_log_train)
         
     main()
->>>>>>> origin/PixiPwr
