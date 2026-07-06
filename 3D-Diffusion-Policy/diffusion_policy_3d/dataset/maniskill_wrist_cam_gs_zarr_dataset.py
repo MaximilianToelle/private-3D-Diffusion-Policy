@@ -67,6 +67,7 @@ class WristCamGSManiskillDataset(BaseDataset):
         val_ratio=0.0,
         max_train_episodes=None,
         representation_space="abs_joint_pos",  # abs_joint_pos | relative_ee_pose
+        min_opacity=0.,     # provide for accurate Gaussian normalization
         verbose=False,
     ):
         super().__init__()
@@ -174,6 +175,14 @@ class WristCamGSManiskillDataset(BaseDataset):
             self.per_buffer_val_masks.append(global_val_mask[offset:offset + count])
             offset += count
 
+        # Determine sequence length based on representation space
+        # For relative_ee_pose, we sample horizon + 1 to compute action[t] = pose[t+1]
+        seq_len = horizon + 1 if representation_space == "relative_ee_pose" else horizon
+        
+        # If we ask the sampler for 1 extra step, we must allow 1 extra padded step at the end 
+        # so that we don't drop the last sample of every episode!
+        actual_pad_after = pad_after + 1 if representation_space == "relative_ee_pose" else pad_after
+
         # =====================================================================
         # Create per-buffer samplers for training
         # =====================================================================
@@ -181,9 +190,9 @@ class WristCamGSManiskillDataset(BaseDataset):
         for buf, train_mask in zip(self.replay_buffers, self.per_buffer_train_masks):
             self.samplers.append(SequenceSampler(
                 replay_buffer=buf,
-                sequence_length=horizon,
+                sequence_length=seq_len,
                 pad_before=pad_before,
-                pad_after=pad_after,
+                pad_after=actual_pad_after,
                 episode_mask=train_mask,
                 keys=self.full_seq_keys
             ))
@@ -194,8 +203,12 @@ class WristCamGSManiskillDataset(BaseDataset):
             
         self.global_train_mask = global_train_mask
         self.horizon = horizon
+        self.seq_len = seq_len
         self.pad_before = pad_before
         self.pad_after = pad_after
+        self.actual_pad_after = actual_pad_after
+
+        self.min_opacity = min_opacity
         
         n_buf = len(self.replay_buffers)
         print(f"[WristCamGSManiskillDataset] Loaded {n_buf} zarr dataset(s), "
@@ -251,9 +264,9 @@ class WristCamGSManiskillDataset(BaseDataset):
         for buf, val_mask in zip(self.replay_buffers, self.per_buffer_val_masks):
             val_set.samplers.append(SequenceSampler(
                 replay_buffer=buf,
-                sequence_length=self.horizon,
+                sequence_length=self.seq_len,
                 pad_before=self.pad_before,
-                pad_after=self.pad_after,
+                pad_after=self.actual_pad_after,
                 episode_mask=val_mask,
                 keys=self.full_seq_keys,
             ))
@@ -317,7 +330,7 @@ class WristCamGSManiskillDataset(BaseDataset):
             desc = f"Streaming dataset {buf_i+1}/{len(self.replay_buffers)} for normalization stats"
             for idx in tqdm(indices, desc=desc):
                 sample = normalization_sampler.sample_sequence(idx)
-                torch_data = self._sample_to_data(sample)
+                torch_data = self._sample_to_data(sample, min_opacity=self.min_opacity)
                 obs = torch_data['obs']
                 
                 update_min_max('action', torch_data['action'])
@@ -406,6 +419,17 @@ class WristCamGSManiskillDataset(BaseDataset):
         for key in ['action', 'agent_proprio']:
             k_min = stats[key]['min']
             k_max = stats[key]['max']
+
+            # identity normalization for gripper which is already between [-1, 1]
+            if key == "action":
+                k_min[-1:] = -1.0
+                k_max[-1:] = 1.0
+            elif key == "agent_proprio":
+                k_min[-2:] = -1.0
+                k_max[-2:] = 1.0
+            else:
+                raise ValueError(f"key {key} is not an implemented option")
+
             k_scale = torch.clamp(k_max - k_min, min=1e-4) / 2.0
             k_offset = -(k_max + k_min) / 2.0 / k_scale
             normalizer[key] = SingleFieldLinearNormalizer.create_manual(
@@ -456,17 +480,18 @@ class WristCamGSManiskillDataset(BaseDataset):
         # For each (timestep, feature_dim), we store a list of sorted 1D tensors,
         # one per dataset. This avoids holding all raw samples in memory at once.
         # Layout: sorted_chunks[t][d] = [sorted_1d_tensor_from_ds0, sorted_1d_tensor_from_ds1, ...]
-        agent_proprio_sorted_chunks = [[[] for _ in range(D_agent_proprio)] for _ in range(T_obs)]
-        action_sorted_chunks = [[[] for _ in range(D_action)] for _ in range(T_horizon)]
+        # NOTE: we do not need to normalize rotations and gripper state but only positions
+        agent_proprio_sorted_chunks = [[[] for _ in range(3)] for _ in range(T_obs)]
+        action_sorted_chunks = [[[] for _ in range(3)] for _ in range(T_horizon)]
         gs_positions_sorted_chunks = [[[] for _ in range(D_gs_positions)] for _ in range(T_obs)]
 
         for buf_i, buf in enumerate(self.replay_buffers):
             norm_mask = self.per_buffer_train_masks[buf_i]
             normalization_sampler = SequenceSampler(
                 replay_buffer=buf,
-                sequence_length=self.horizon,
+                sequence_length=self.seq_len,
                 pad_before=self.pad_before,
-                pad_after=self.pad_after,
+                pad_after=self.actual_pad_after,
                 episode_mask=norm_mask,
                 keys=self.full_seq_keys,  # sampler only handles these keys
             )
@@ -484,10 +509,10 @@ class WristCamGSManiskillDataset(BaseDataset):
                 sample['gsplats'] = self._get_synced_obs_slice(
                     raw_indices, self.gsplats_arrays[buf_i], name="gsplats")
 
-                torch_data = self._sample_to_data(sample)
+                torch_data = self._sample_to_data(sample, min_opacity=self.min_opacity) 
 
-                dataset_agent_proprio_vals.append(torch_data['obs']['agent_proprio'])        # (T_obs, D_agent_proprio)
-                dataset_action_vals.append(torch_data['action'])                     # (T_horizon, D_action)
+                dataset_agent_proprio_vals.append(torch_data['obs']['agent_proprio'][..., :3])        # (T_obs, 3)
+                dataset_action_vals.append(torch_data['action'][..., :3])                     # (T_horizon, 3)
                 dataset_gs_positions_vals.append(torch_data['obs']['gs_positions'])  # (T_obs, N_gaussians, 3)
 
             if len(dataset_agent_proprio_vals) == 0:
@@ -498,14 +523,14 @@ class WristCamGSManiskillDataset(BaseDataset):
             # tensors to free memory before processing the next dataset.
             agent_proprio_stacked = torch.stack(dataset_agent_proprio_vals, dim=0)  # (N_samples, T_obs, D_agent_proprio)
             for t in range(T_obs):
-                for d in range(D_agent_proprio):
+                for d in range(3):
                     agent_proprio_sorted_chunks[t][d].append(
                         agent_proprio_stacked[:, t, d].contiguous().sort()[0])
             del dataset_agent_proprio_vals, agent_proprio_stacked
 
             action_stacked = torch.stack(dataset_action_vals, dim=0)  # (N_samples, T_horizon, D_action)
             for t in range(T_horizon):
-                for d in range(D_action):
+                for d in range(3):
                     action_sorted_chunks[t][d].append(
                         action_stacked[:, t, d].contiguous().sort()[0])
             del dataset_action_vals, action_stacked
@@ -585,8 +610,15 @@ class WristCamGSManiskillDataset(BaseDataset):
         upper_percentile = 98
 
         # --- agent_proprio ---
-        p02_agent_proprio, p98_agent_proprio = build_percentile_tensors(
-            agent_proprio_sorted_chunks, T_obs, D_agent_proprio, lower_percentile, upper_percentile)
+        p02_agent_proprio = torch.full((T_obs, D_agent_proprio), -1.0)
+        p98_agent_proprio = torch.full((T_obs, D_agent_proprio), 1.0)
+
+        p02_agent_proprio_pos, p98_agent_proprio_pos = build_percentile_tensors(
+            agent_proprio_sorted_chunks, T_obs, 3, lower_percentile, upper_percentile)
+        
+        p02_agent_proprio[:, :3] = p02_agent_proprio_pos
+        p98_agent_proprio[:, :3] = p98_agent_proprio_pos
+
         normalizer['agent_proprio'] = PerTimestepLinearNormalizer.create_clamped_percentile_normalizer(
             p02=p02_agent_proprio, p98=p98_agent_proprio,
             n_timesteps=T_obs, n_features=D_agent_proprio,
@@ -594,8 +626,15 @@ class WristCamGSManiskillDataset(BaseDataset):
         del agent_proprio_sorted_chunks
 
         # --- action ---
-        p02_action, p98_action = build_percentile_tensors(
-            action_sorted_chunks, T_horizon, D_action, lower_percentile, upper_percentile)
+        p02_action = torch.full((self.horizon, D_action), -1.0)
+        p98_action = torch.full((self.horizon, D_action), 1.0)
+
+        p02_action_pos, p98_action_pos = build_percentile_tensors(
+            action_sorted_chunks, T_horizon, 3, lower_percentile, upper_percentile)
+        
+        p02_action[:, :3] = p02_action_pos
+        p98_action[:, :3] = p98_action_pos    
+        
         normalizer['action'] = PerTimestepLinearNormalizer.create_clamped_percentile_normalizer(
             p02=p02_action, p98=p98_action,
             n_timesteps=T_horizon, n_features=D_action,
@@ -729,12 +768,14 @@ class WristCamGSManiskillDataset(BaseDataset):
             )
         return obs_slice
 
-    def _sample_to_data(self, sample):
+    def _sample_to_data(self, sample, min_opacity=None):
         """ 
         Returns data as dict of torch tensors.
         Handles two representation modes:
           - abs_joint_pos: pass-through (joint positions as proprio and actions)
           - relative_ee_pose: SE(3) transform GS into anchor frame, relative proprio and actions
+        
+        TODO: Introduce min_opacity sampling for accurate normalization!
         """
         gsplats = sample['gsplats']   # (n_obs_steps, N, D) numpy float16
 
@@ -765,10 +806,10 @@ class WristCamGSManiskillDataset(BaseDataset):
             # All quantities expressed relative to the anchor ("current time") frame
             # =====================================================
             
-            tcp_pose_horizon = sample['tcp_pose'].astype(np.float32)     # (horizon, 7)
-            tcp_pose_obs = tcp_pose_horizon[:self.n_obs_steps]           # (n_obs_steps, 7)
+            tcp_pose = sample['tcp_pose'].astype(np.float32)     # (horizon + 1, 7)
+            tcp_pose_obs = tcp_pose[:self.n_obs_steps]           # (n_obs_steps, 7)
             qpos = sample['state'].astype(np.float32)                   # (n_obs_steps, 9)
-            action_raw = sample['action'].astype(np.float32)             # (horizon, 8)
+            absolute_joint_pos_action = sample['action'].astype(np.float32)             # (horizon + 1, 8)
             gsplats = gsplats.astype(np.float32)                         # (n_obs_steps, N, D)
 
             # --- Anchor frame: TCP at the last observation step ---
@@ -827,11 +868,15 @@ class WristCamGSManiskillDataset(BaseDataset):
 
             # --- 3. Actions: relative EE pose + gripper ---
             # pos(3) + rot6d(6) + gripper(1) = 10D per action step
-            full_horizon_tcp_to_base = _pose7_to_mat_np(tcp_pose_horizon)   # (horizon, 4, 4)
-            T_rel_action = T_anchor_base_to_tcp[None, :, :] @ full_horizon_tcp_to_base # (horizon, 4, 4)
+            
+            # Shift by 1: the action at time t is the pose at t+1
+            target_tcp_poses = tcp_pose[1:self.horizon + 1]   # (horizon, 7)
+            
+            target_tcp_to_base = _pose7_to_mat_np(target_tcp_poses)   # (horizon, 4, 4)
+            T_rel_action = T_anchor_base_to_tcp[None, :, :] @ target_tcp_to_base # (horizon, 4, 4)
             rel_action_pose9d = _mat_to_pose9d_np(T_rel_action)  # (horizon, 9)
-            # NOTE: using the absolute gripper action
-            gripper_action = action_raw[:, -1:]                   # (horizon, 1)
+            # NOTE: using the abs gripper action extracted from the recorded abs joint pos actions
+            gripper_action = absolute_joint_pos_action[:self.horizon, -1:]                   # (horizon, 1)
             action_np = np.concatenate([rel_action_pose9d, gripper_action], axis=-1)  # (horizon, 10)
             action = torch.from_numpy(action_np)
 

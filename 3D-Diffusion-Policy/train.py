@@ -432,6 +432,12 @@ class TrainDP3Workspace:
         policy.to(torch.device(cfg.training.device))
 
         if use_dataset:
+            runner_log = env_runner.run(policy, prefix=f"seperate_eval_train_epoch_{self.epoch}", dataset=dataset)
+            cprint(f"---------------- Eval Results - Train Dataset --------------", 'magenta')
+            for key, value in runner_log.items():
+                if isinstance(value, float):
+                    cprint(f"{key}: {value:.4f}", 'magenta')
+
             runner_log = env_runner.run(policy, prefix=f"seperate_eval_val_epoch_{self.epoch}", dataset=val_dataset)
             cprint(f"---------------- Eval Results - Validation Dataset --------------", 'magenta')
             for key, value in runner_log.items():
