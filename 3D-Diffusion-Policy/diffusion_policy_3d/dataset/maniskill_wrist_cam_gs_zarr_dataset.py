@@ -237,7 +237,9 @@ class WristCamGSManiskillDataset(BaseDataset):
         
         Returns:
             init_state: dict with 'actor_poses' and 'agent_pos'
-            expert_q_sequence: np.ndarray of the full expert state trajectory
+            expert_trajectory: np.ndarray of the full expert trajectory.
+                - abs_joint_pos: joint state (qpos) trajectory
+                - relative_ee_pose: tcp_pose (7D) + gripper_state (2D) = 9D trajectory
         """
         buf_idx, local_ep_idx = self._global_episode_to_local(global_episode_idx)
         buf = self.replay_buffers[buf_idx]
@@ -252,8 +254,15 @@ class WristCamGSManiskillDataset(BaseDataset):
             }
         init_state['agent_pos'] = buf['state'][start_idx]
         
-        expert_q_sequence = buf['state'][start_idx:end_idx]
-        return init_state, expert_q_sequence
+        if self.representation_space == "abs_joint_pos":
+            expert_trajectory = buf['state'][start_idx:end_idx]
+        elif self.representation_space == "relative_ee_pose":
+            # tcp_pose: (T, 7) [x,y,z,qw,qx,qy,qz], gripper: last 2 dims of state
+            tcp_pose = buf['tcp_pose'][start_idx:end_idx]
+            gripper_state = buf['state'][start_idx:end_idx][:, -2:]
+            expert_trajectory = np.concatenate([tcp_pose, gripper_state], axis=-1)  # (T, 9)
+        
+        return init_state, expert_trajectory
 
     # =====================================================================
     # Validation dataset

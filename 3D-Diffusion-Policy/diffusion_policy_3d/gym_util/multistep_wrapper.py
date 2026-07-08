@@ -128,7 +128,7 @@ class MultiStepWrapper(gym.Wrapper):
         obs = super().reset(**kwargs)
 
         self.obs = deque([obs], maxlen=self.n_obs_steps+1)
-        self.traj_agent_proprio = deque([obs['agent_proprio']], maxlen=self.max_episode_steps)
+        self.traj_agent_proprio = deque([obs['agent_proprio']], maxlen=self.max_episode_steps + 1)
         self.reward = list()
         self.done = list()
         self.info = defaultdict(lambda : deque(maxlen=self.n_obs_steps+1))

@@ -124,7 +124,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
         for episode_idx in tqdm.tqdm(range(self.eval_episodes), desc=f"Eval ManiSkill {self.task_name}", leave=False, mininterval=self.tqdm_interval_sec):
             
             init_state = None
-            expert_q_sequence = None
+            expert_trajectory = None
             
             if dataset is not None:
                 # Pick a random episode from the global train/val mask
@@ -133,7 +133,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
                 random_episode_idx = np.random.choice(valid_episode_indices)
                 
                 # get_episode_init_data handles multi-buffer routing internally
-                init_state, expert_q_sequence = dataset.get_episode_init_data(random_episode_idx)
+                init_state, expert_trajectory = dataset.get_episode_init_data(random_episode_idx)
 
             obs = env.reset(options={'init_state': init_state} if init_state is not None else None)
             policy.reset()
@@ -182,12 +182,20 @@ class WristCamGSManiSkillRunner(BaseRunner):
                                           lambda x: x.detach())
                 action = action_dict['action'].squeeze(0)
 
-                # Log predicted action targets (what the policy wants the PD controller to reach)
-                current_predicted_actions.extend(action.cpu().numpy())
+                # Log predicted action targets (what the policy wants the controller to reach)
+                if self.representation_space == "abs_joint_pos":
+                    current_predicted_actions.extend(action.cpu().numpy())
 
                 #start = time.time()
                 obs, reward, done, info = env.step(action)
                 #print(f"Env step took: {time.time() - start}") 
+
+                if self.representation_space == "relative_ee_pose":
+                    # After env.step, the RelativeEEControlWrapper stores the absolute TCP actions
+                    # env_action format: (n_action_steps, 7) -> [x,y,z, euler_x,euler_y,euler_z, gripper]
+                    abs_tcp_actions = env.last_env_actions.cpu().numpy()
+                    current_predicted_actions.extend(abs_tcp_actions)
+
                 traj_reward += reward
                 done = bool(done)
                 
@@ -202,7 +210,7 @@ class WristCamGSManiSkillRunner(BaseRunner):
                         s = bool(s)
                     is_success = is_success or s
 
-            all_expert_trajectories.append(expert_q_sequence)
+            all_expert_trajectories.append(expert_trajectory)
             all_policy_trajectories.append(torch.stack(list(env.traj_agent_proprio)).cpu().numpy())
             all_predicted_actions.append(np.array(current_predicted_actions))
             all_num_unique_gaussians.append(np.array(current_num_unique_gaussians))
@@ -236,27 +244,40 @@ class WristCamGSManiSkillRunner(BaseRunner):
         try:
             plot_dir = os.path.join(self.output_dir, "eval_plots")
             os.makedirs(plot_dir, exist_ok=True)
-            plot_path = os.path.join(plot_dir, f"{prefix}_phase_corridor.png")
-            joint_pos_path = os.path.join(plot_dir, f"{prefix}_joint_pos_time.png")
             num_unique_gs_path = os.path.join(plot_dir, f"{prefix}_num_unique_gaussians_time.png")
             
             control_dt = 1.0 / self.env.unwrapped.env.unwrapped.control_freq 
             
-            save_phase_corridor_plot(
-                all_expert_trajectories, 
-                all_policy_trajectories, 
-                dt=control_dt, 
-                save_path=plot_path
-            )
-            cprint(f"Saved Phase Corridor plot to {plot_path}", "cyan")
-            
-            save_joint_pos_over_time_plot(
-                all_expert_trajectories, 
-                all_policy_trajectories,
-                all_predicted_actions,
-                save_path=joint_pos_path
-            )
-            cprint(f"Saved Joint Position plot to {joint_pos_path}", "cyan")
+            if self.representation_space == "abs_joint_pos":
+                plot_path = os.path.join(plot_dir, f"{prefix}_phase_corridor.png")
+                joint_pos_path = os.path.join(plot_dir, f"{prefix}_joint_pos_time.png")
+                
+                save_phase_corridor_plot(
+                    all_expert_trajectories, 
+                    all_policy_trajectories, 
+                    dt=control_dt, 
+                    save_path=plot_path
+                )
+                cprint(f"Saved Phase Corridor plot to {plot_path}", "cyan")
+                
+                save_joint_pos_over_time_plot(
+                    all_expert_trajectories, 
+                    all_policy_trajectories,
+                    all_predicted_actions,
+                    save_path=joint_pos_path
+                )
+                cprint(f"Saved Joint Position plot to {joint_pos_path}", "cyan")
+                
+            elif self.representation_space == "relative_ee_pose":
+                tcp_state_path = os.path.join(plot_dir, f"{prefix}_tcp_state_time.png")
+                
+                save_tcp_state_over_time_plot(
+                    all_expert_trajectories, 
+                    all_policy_trajectories,
+                    all_predicted_actions,
+                    save_path=tcp_state_path
+                )
+                cprint(f"Saved TCP State plot to {tcp_state_path}", "cyan")
             
             save_num_unique_gaussians_plot(
                 all_num_unique_gaussians,
@@ -391,7 +412,7 @@ def save_joint_pos_over_time_plot(
         # Plot all Predicted Actions
         for i, p_a in enumerate(predicted_actions):
             if p_a is not None and j < p_a.shape[1]:
-                time_axis = np.arange(len(p_a))
+                time_axis = np.arange(1, len(p_a) + 1)
                 label = 'Predicted Action (PD target)' if i == 0 else "_nolegend_"
                 ax.plot(time_axis, p_a[:, j], color='dodgerblue', alpha=0.4, linewidth=1.0, linestyle='--', label=label)
 
@@ -405,6 +426,146 @@ def save_joint_pos_over_time_plot(
     plt.savefig(save_path, dpi=300)
     plt.close(fig)
 
+
+def _quat_wxyz_to_euler_xyz_deg(quat_wxyz):
+    """Convert quaternion [qw,qx,qy,qz] array to Euler XYZ angles in degrees.
+    
+    Args:
+        quat_wxyz: np.ndarray of shape (..., 4) with [qw, qx, qy, qz]
+    Returns:
+        euler_deg: np.ndarray of shape (..., 3) with [roll, pitch, yaw] in degrees
+    """
+    from scipy.spatial.transform import Rotation
+    original_shape = quat_wxyz.shape[:-1]
+    quat_flat = quat_wxyz.reshape(-1, 4)
+    # scipy expects [qx, qy, qz, qw], our data is [qw, qx, qy, qz]
+    quat_xyzw = quat_flat[:, [1, 2, 3, 0]]
+    euler_rad = Rotation.from_quat(quat_xyzw).as_euler('XYZ')
+    euler_deg = np.degrees(euler_rad)
+    return euler_deg.reshape(original_shape + (3,))
+
+
+def save_tcp_state_over_time_plot(
+    expert_trajectories: list, 
+    policy_trajectories: list,
+    predicted_actions: list = None,
+    save_path: str = "tcp_state_time.png"
+):
+    """ Generates Position, Orientation (Euler), and Gripper State over Timestep plots.
+    
+    Data formats:
+    - expert_trajectories: list of (T, 9) arrays [x,y,z, qw,qx,qy,qz, grip1, grip2]
+    - policy_trajectories: list of (T, 9) arrays [x,y,z, qw,qx,qy,qz, grip1, grip2]
+    - predicted_actions: list of (T, 7) arrays [x,y,z, euler_x,euler_y,euler_z, gripper]
+    
+    Subplots (8 total):
+    - Position: x, y, z (meters)
+    - Orientation: roll, pitch, yaw (degrees, converted from quaternion for expert/actual)
+    - Gripper: grip1, grip2 (only 1D gripper action for predicted)
+    """
+    if len(policy_trajectories) == 0:
+        return None
+
+    pos_labels = ['x [m]', 'y [m]', 'z [m]']
+    rot_labels = ['Roll [deg]', 'Pitch [deg]', 'Yaw [deg]']
+    grip_labels = ['Gripper 1', 'Gripper 2']
+    num_subplots = 8  # 3 pos + 3 rot + 2 gripper
+    
+    fig, axes = plt.subplots(nrows=num_subplots, ncols=1, figsize=(12, 3 * num_subplots))
+    fig.suptitle("TCP State over Time: Predicted vs. Actual vs. Ground Truth", fontsize=16, fontweight='bold')
+    
+    # --- Position subplots (indices 0, 1, 2) ---
+    for dim in range(3):
+        ax = axes[dim]
+        
+        for i, p_traj in enumerate(policy_trajectories):
+            time_axis = np.arange(len(p_traj))
+            label = 'Actual TCP Pose' if i == 0 else "_nolegend_"
+            ax.plot(time_axis, p_traj[:, dim], color='red', alpha=0.3, linewidth=1.0, label=label)
+        
+        for i, e_traj in enumerate(expert_trajectories):
+            if e_traj is not None:
+                time_axis = np.arange(len(e_traj))
+                label = 'Motion Planner (Expert)' if i == 0 else "_nolegend_"
+                ax.plot(time_axis, e_traj[:, dim], color='black', linewidth=2, label=label)
+        
+        if predicted_actions is not None:
+            for i, p_a in enumerate(predicted_actions):
+                if p_a is not None:
+                    time_axis = np.arange(1, len(p_a) + 1)
+                    label = 'Predicted Action (EE target)' if i == 0 else "_nolegend_"
+                    ax.plot(time_axis, p_a[:, dim], color='dodgerblue', alpha=0.4, linewidth=1.0, linestyle='--', label=label)
+        
+        ax.set_title(f"Position: {pos_labels[dim]}")
+        ax.set_ylabel(pos_labels[dim])
+        ax.grid(True, alpha=0.3)
+        if dim == 0: ax.legend(loc='upper right')
+    
+    # --- Orientation subplots (indices 3, 4, 5) ---
+    for dim in range(3):
+        ax = axes[3 + dim]
+        
+        for i, p_traj in enumerate(policy_trajectories):
+            # policy_trajectories has quaternion [qw,qx,qy,qz] at indices 3:7
+            euler_deg = _quat_wxyz_to_euler_xyz_deg(p_traj[:, 3:7])
+            time_axis = np.arange(len(p_traj))
+            label = 'Actual TCP Orientation' if i == 0 else "_nolegend_"
+            ax.plot(time_axis, euler_deg[:, dim], color='red', alpha=0.3, linewidth=1.0, label=label)
+        
+        for i, e_traj in enumerate(expert_trajectories):
+            if e_traj is not None:
+                euler_deg = _quat_wxyz_to_euler_xyz_deg(e_traj[:, 3:7])
+                time_axis = np.arange(len(e_traj))
+                label = 'Motion Planner (Expert)' if i == 0 else "_nolegend_"
+                ax.plot(time_axis, euler_deg[:, dim], color='black', linewidth=2, label=label)
+        
+        if predicted_actions is not None:
+            for i, p_a in enumerate(predicted_actions):
+                if p_a is not None:
+                    # predicted_actions already has Euler [euler_x, euler_y, euler_z] at indices 3:6
+                    euler_deg = np.degrees(p_a[:, 3 + dim])
+                    time_axis = np.arange(1, len(p_a) + 1)
+                    label = 'Predicted Action (EE target)' if i == 0 else "_nolegend_"
+                    ax.plot(time_axis, euler_deg, color='dodgerblue', alpha=0.4, linewidth=1.0, linestyle='--', label=label)
+        
+        ax.set_title(f"Orientation: {rot_labels[dim]}")
+        ax.set_ylabel(rot_labels[dim])
+        ax.grid(True, alpha=0.3)
+        if dim == 0: ax.legend(loc='upper right')
+    
+    # --- Gripper subplots (indices 6, 7) ---
+    for dim in range(2):
+        ax = axes[6 + dim]
+        
+        for i, p_traj in enumerate(policy_trajectories):
+            # Gripper state at indices 7:9
+            time_axis = np.arange(len(p_traj))
+            label = 'Actual Gripper State' if i == 0 else "_nolegend_"
+            ax.plot(time_axis, p_traj[:, 7 + dim], color='red', alpha=0.3, linewidth=1.0, label=label)
+        
+        for i, e_traj in enumerate(expert_trajectories):
+            if e_traj is not None:
+                time_axis = np.arange(len(e_traj))
+                label = 'Motion Planner (Expert)' if i == 0 else "_nolegend_"
+                ax.plot(time_axis, e_traj[:, 7 + dim], color='black', linewidth=2, label=label)
+        
+        if predicted_actions is not None:
+            # Predicted actions only have 1D gripper (index 6), but we plot it on both gripper subplots
+            for i, p_a in enumerate(predicted_actions):
+                if p_a is not None and p_a.shape[1] > 6:
+                    time_axis = np.arange(1, len(p_a) + 1)
+                    label = 'Predicted Action (gripper target)' if i == 0 else "_nolegend_"
+                    ax.plot(time_axis, p_a[:, 6], color='dodgerblue', alpha=0.4, linewidth=1.0, linestyle='--', label=label)
+        
+        ax.set_title(f"Gripper: {grip_labels[dim]}")
+        ax.set_ylabel(grip_labels[dim])
+        ax.grid(True, alpha=0.3)
+        if dim == 0: ax.legend(loc='upper right')
+        if dim == 1: ax.set_xlabel("Timestep")
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.98])
+    plt.savefig(save_path, dpi=300)
+    plt.close(fig)
 
 def save_num_unique_gaussians_plot(
     all_num_unique_gaussians: list,

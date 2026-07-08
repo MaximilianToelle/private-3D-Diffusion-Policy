@@ -13,28 +13,18 @@ class RelativeEEControlWrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
         self.T_cur_anchor_tcp_to_base = None
+        self.last_env_actions = None  
 
     def step(self, action):
         """
-        Transform relative EE action in anchor tcp frame to absolute EE action in base frame
-        action: (n_action_steps, 10) -> [9D rel pose, 1D gripper]
+        Action Transfrom -> Env Step -> Observation Transform
         """
             
-        rel_action_pose9d = action[..., :9]
-        gripper_action = action[..., 9:]
-        
-        # Transform relative EE action to absolute EE action using the anchor frame
-        T_rel_action = pose9d_to_mat(rel_action_pose9d)
-        T_target = self.T_cur_anchor_tcp_to_base.unsqueeze(0) @ T_rel_action
-        abs_pose6 = mat_to_pose6d_euler(T_target)
-        
-        # Re-attach gripper action
-        env_action = torch.cat([abs_pose6, gripper_action], dim=-1)
-        
-        # Call inner environment step
+        env_action = self._transform_action(action)
+        self.last_env_actions = env_action.detach().clone()     # saved for logging
         obs, reward, done, info = self.env.step(env_action)
-        
         rel_obs = self._transform_obs(obs)
+
         return rel_obs, reward, done, info
 
     def reset(self, **kwargs):
@@ -46,7 +36,7 @@ class RelativeEEControlWrapper(gym.Wrapper):
         Takes the raw obs dictionary (with stacked n_obs_steps sequences) and transforms
         proprioception and Gaussians into the anchor frame (the TCP pose of the current timestep).
         """
-        tcp_pose_obs = obs['agent_proprio'][..., :-2]   # (n_obs_steps, 7)
+        tcp_pose_obs = obs['agent_proprio'][..., :-2]   # (n_obs_steps, 7), position + quaternion
         
         # Anchor frame: TCP at the last observation step
         anchor_tcp_to_base = pose7_to_mat(tcp_pose_obs[-1])  # (4, 4)
@@ -88,3 +78,22 @@ class RelativeEEControlWrapper(gym.Wrapper):
             pass
         
         return rel_obs
+
+    def _transform_action(self, action):
+        """
+        Transform relative EE action in anchor tcp frame to absolute EE action in base frame
+        action: (n_action_steps, 10) -> [9D rel pose, 1D gripper]
+        """
+
+        rel_action_pose9d = action[..., :9]
+        gripper_action = action[..., 9:]
+        
+        # Transform relative EE action to absolute EE action using the anchor frame
+        T_rel_action = pose9d_to_mat(rel_action_pose9d)
+        T_target = self.T_cur_anchor_tcp_to_base.unsqueeze(0) @ T_rel_action
+        abs_pose6 = mat_to_pose6d_euler(T_target)
+        
+        # Re-attach gripper action
+        env_action = torch.cat([abs_pose6, gripper_action], dim=-1)
+
+        return env_action
