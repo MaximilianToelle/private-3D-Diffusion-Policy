@@ -10,9 +10,9 @@ import gymnasium
 import gsworld      # for gym env registration
 
 # DynaGSLAM config / params
-# from argparse import ArgumentParser
-# from utils.config_utils import read_config
-# from arguments import MapParams, OptimizationParams
+from argparse import ArgumentParser
+from dynagslam.utils.config_utils import read_config
+from dynagslam.arguments import MapParams, OptimizationParams
 
 from diffusion_policy_3d.env.maniskill.dynagslam_wrapper import DynaGSLAMWrapper
 from diffusion_policy_3d.gym_util.multistep_wrapper import MultiStepWrapper
@@ -47,20 +47,22 @@ class DynaGSLAMManiSkillRunner(BaseRunner):
         self.task_name = task_name
 
         # --- Load DynaGSLAM args from config file --------------------------------
-        # if slam_config_path is None:
-        #     raise ValueError("slam_config_path must be provided for OnlineGSManiSkillRunner")
-        # slam_args = read_config(slam_config_path)
+        #if slam_config_path is None:
+        #   raise ValueError("slam_config_path must be provided for OnlineGSManiSkillRunner")
+        #slam_args = read_config(dynagslam_config)
+        slam_args = dynagslam_config
 
         # Enforce sim-compatible settings:
         #   • use_gt_pose=True  → skip ORB/ICP tracker, use sim camera extrinsics
         #   • mode='single process' → no multiprocessing overhead
-        # slam_args.use_gt_pose = True
-        # slam_args.mode = "single process"
+        slam_args.use_gt_pose = True
+        slam_args.mode = "single process"
 
-        # parser = ArgumentParser()
-        # _map_params = MapParams(parser)
-        # optimization_params = OptimizationParams(parser)
-        # optimization_params = optimization_params.extract(slam_args)
+        parser = ArgumentParser()
+        _map_params = MapParams(parser)
+        optimization_params = OptimizationParams(parser)
+        #optimization_params = optimizatioTypeError('expected str, bytes or os.PathLike object, not DictConfig')
+
         # -------------------------------------------------------------------------
 
         def env_fn(task_name):

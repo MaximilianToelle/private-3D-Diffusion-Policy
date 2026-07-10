@@ -6,7 +6,7 @@ name: maniskill_wrist_cam_dynagslam_stack
 
 env_runner:
   _target_: diffusion_policy_3d.env_runner.dynagslam_maniskill_runner.DynaGSLAMManiSkillRunner
-  task_name: StackFr3WristCamSimpleEnv-v1
+  task_name: StackFr3WristCamEnv-v1
   num_gaussians: ${task.num_gaussians}
   use_gsplat_viewer: false
   cam_name: "wrist_cam"
