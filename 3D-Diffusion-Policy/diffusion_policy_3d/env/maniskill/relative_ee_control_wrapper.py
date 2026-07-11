@@ -2,7 +2,7 @@ import gym
 import torch
 import numpy as np
 import copy
-from diffusion_policy_3d.env.maniskill.utils import pose9d_to_mat, mat_to_pose6d_euler, pose7_to_mat, mat_to_pose9d
+from diffusion_policy_3d.env.maniskill.utils import pose9d_to_mat, mat_to_pose7d_quaternion, pose7_to_mat, mat_to_pose9d
 
 
 class RelativeEEControlWrapper(gym.Wrapper):
@@ -91,9 +91,9 @@ class RelativeEEControlWrapper(gym.Wrapper):
         # Transform relative EE action to absolute EE action using the anchor frame
         T_rel_action = pose9d_to_mat(rel_action_pose9d)
         T_target = self.T_cur_anchor_tcp_to_base.unsqueeze(0) @ T_rel_action
-        abs_pose6 = mat_to_pose6d_euler(T_target)
+        abs_pose7d = mat_to_pose7d_quaternion(T_target)
         
         # Re-attach gripper action
-        env_action = torch.cat([abs_pose6, gripper_action], dim=-1)
+        env_action = torch.cat([abs_pose7d, gripper_action], dim=-1)
 
         return env_action

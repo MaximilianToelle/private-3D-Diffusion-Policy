@@ -8,6 +8,7 @@ import time
 import os
 from typing import Dict
 import imageio
+from scipy.spatial.transform import Rotation
 
 import matplotlib
 matplotlib.use('Agg')
@@ -64,12 +65,12 @@ class WristCamGSManiSkillRunner(BaseRunner):
                 task_name, 
                 robot_uids="fr3_umi_wrist435_modified",
                 obs_mode="rgb+depth+segmentation",
-                control_mode="pd_ee_pose" if representation_space == "relative_ee_pose" else "pd_joint_pos",
+                control_mode="pd_ee_pos_quat" if representation_space == "relative_ee_pose" else "pd_joint_pos",
                 num_envs=n_envs,
                 max_episode_steps=max_steps,
                 sim_backend="gpu",
                 sim_config=dict(sim_freq=100, control_freq=20),  # match data collection -> 5 physics substeps!
-                )
+            )
             
             parser = argparse.ArgumentParser()
             robot_pipe = PipelineParams(parser)
@@ -428,19 +429,24 @@ def save_joint_pos_over_time_plot(
 
 
 def _quat_wxyz_to_euler_xyz_deg(quat_wxyz):
-    """Convert quaternion [qw,qx,qy,qz] array to Euler XYZ angles in degrees.
+    """Convert quaternion [qw,qx,qy,qz] array to unwrapped Euler XYZ angles in degrees.
+    
+    Applies np.unwrap along the time axis to remove ±180° wrapping discontinuities
+    that are inherent to the Euler angle representation.
     
     Args:
-        quat_wxyz: np.ndarray of shape (..., 4) with [qw, qx, qy, qz]
+        quat_wxyz: np.ndarray of shape (T, 4) with [qw, qx, qy, qz]
     Returns:
-        euler_deg: np.ndarray of shape (..., 3) with [roll, pitch, yaw] in degrees
+        euler_deg: np.ndarray of shape (T, 3) with [roll, pitch, yaw] in degrees (unwrapped)
     """
-    from scipy.spatial.transform import Rotation
+    
     original_shape = quat_wxyz.shape[:-1]
     quat_flat = quat_wxyz.reshape(-1, 4)
     # scipy expects [qx, qy, qz, qw], our data is [qw, qx, qy, qz]
     quat_xyzw = quat_flat[:, [1, 2, 3, 0]]
     euler_rad = Rotation.from_quat(quat_xyzw).as_euler('XYZ')
+    # Unwrap each angle column to remove ±π discontinuities before converting to degrees
+    euler_rad = np.unwrap(euler_rad, axis=0)
     euler_deg = np.degrees(euler_rad)
     return euler_deg.reshape(original_shape + (3,))
 
@@ -456,7 +462,7 @@ def save_tcp_state_over_time_plot(
     Data formats:
     - expert_trajectories: list of (T, 9) arrays [x,y,z, qw,qx,qy,qz, grip1, grip2]
     - policy_trajectories: list of (T, 9) arrays [x,y,z, qw,qx,qy,qz, grip1, grip2]
-    - predicted_actions: list of (T, 7) arrays [x,y,z, euler_x,euler_y,euler_z, gripper]
+    - predicted_actions: list of (T, 8) arrays [x,y,z, qw,qx,qy,qz, gripper]
     
     Subplots (8 total):
     - Position: x, y, z (meters)
@@ -467,7 +473,7 @@ def save_tcp_state_over_time_plot(
         return None
 
     pos_labels = ['x [m]', 'y [m]', 'z [m]']
-    rot_labels = ['Roll [deg]', 'Pitch [deg]', 'Yaw [deg]']
+    rot_labels = ['Roll [deg] (unwrapped)', 'Pitch [deg] (unwrapped)', 'Yaw [deg] (unwrapped)']
     grip_labels = ['Gripper 1', 'Gripper 2']
     num_subplots = 8  # 3 pos + 3 rot + 2 gripper
     
@@ -522,11 +528,10 @@ def save_tcp_state_over_time_plot(
         if predicted_actions is not None:
             for i, p_a in enumerate(predicted_actions):
                 if p_a is not None:
-                    # predicted_actions already has Euler [euler_x, euler_y, euler_z] at indices 3:6
-                    euler_deg = np.degrees(p_a[:, 3 + dim])
+                    euler_deg = _quat_wxyz_to_euler_xyz_deg(p_a[:, 3:7])
                     time_axis = np.arange(1, len(p_a) + 1)
                     label = 'Predicted Action (EE target)' if i == 0 else "_nolegend_"
-                    ax.plot(time_axis, euler_deg, color='dodgerblue', alpha=0.4, linewidth=1.0, linestyle='--', label=label)
+                    ax.plot(time_axis, euler_deg[:, dim], color='dodgerblue', alpha=0.4, linewidth=1.0, linestyle='--', label=label)
         
         ax.set_title(f"Orientation: {rot_labels[dim]}")
         ax.set_ylabel(rot_labels[dim])
@@ -550,12 +555,12 @@ def save_tcp_state_over_time_plot(
                 ax.plot(time_axis, e_traj[:, 7 + dim], color='black', linewidth=2, label=label)
         
         if predicted_actions is not None:
-            # Predicted actions only have 1D gripper (index 6), but we plot it on both gripper subplots
+            # Predicted actions only have 1D gripper (index 7), but we plot it on both gripper subplots
             for i, p_a in enumerate(predicted_actions):
-                if p_a is not None and p_a.shape[1] > 6:
+                if p_a is not None and p_a.shape[1] > 7:
                     time_axis = np.arange(1, len(p_a) + 1)
                     label = 'Predicted Action (gripper target)' if i == 0 else "_nolegend_"
-                    ax.plot(time_axis, p_a[:, 6], color='dodgerblue', alpha=0.4, linewidth=1.0, linestyle='--', label=label)
+                    ax.plot(time_axis, p_a[:, 7], color='dodgerblue', alpha=0.4, linewidth=1.0, linestyle='--', label=label)
         
         ax.set_title(f"Gripper: {grip_labels[dim]}")
         ax.set_ylabel(grip_labels[dim])
