@@ -12,7 +12,7 @@ dataset:
   _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_zarr_dataset.WristCamGSManiskillDataset
   # --- Three ways to specify datasets ---
   # 1. Single zarr path (has .zgroup inside):
-  zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_1_with_tcp_positions_surf_normals_opacities_active_gaussians_mask_semantics
+  zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_1_new_key_names_positions_surf_normals_opacities_active_gaussians_mask_semantics
   # 2. Parent directory (all zarr children auto-discovered):
   # zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_all
   # 3. Explicit list:

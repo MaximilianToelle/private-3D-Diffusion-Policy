@@ -87,7 +87,8 @@ class WristCamGSManiskillDataset(BaseDataset):
         # =====================================================================
         self.replay_buffers: List[ReplayBuffer] = []
         self.gsplats_arrays = []
-        self.state_arrays = []
+        self.joint_pos_proprio_arrays = []
+        self.tcp_pose_proprio_arrays = []
         
         for path in self.zarr_paths:
             # buf = ReplayBuffer.create_from_path(path, mode='r')
@@ -95,7 +96,8 @@ class WristCamGSManiskillDataset(BaseDataset):
             
             self.replay_buffers.append(buf)
             self.gsplats_arrays.append(buf.root['data']['gsplats'])
-            self.state_arrays.append(buf.root['data']['state'])
+            self.joint_pos_proprio_arrays.append(buf.root['data']['joint_pos_proprio'])
+            self.tcp_pose_proprio_arrays.append(buf.root['data']['tcp_pose_proprio'])
  
         # =====================================================================
         # Read gs_params / gs_param_sizes from the first buffer, verify all match
@@ -103,10 +105,9 @@ class WristCamGSManiskillDataset(BaseDataset):
         first_buf = self.replay_buffers[0]
         self.actor_keys = [k for k in first_buf.keys() if k.startswith('actor_pose_')]
         if self.representation_space == "abs_joint_pos":
-            self.full_seq_keys = ['action'] + self.actor_keys
+            self.full_seq_keys = ['joint_pos_action'] + self.actor_keys
         elif self.representation_space == "relative_ee_pose":
-            # Need action (for gripper dim) and tcp_pose (for relative EE computation) over the full horizon
-            self.full_seq_keys = ['action', 'tcp_pose'] + self.actor_keys
+            self.full_seq_keys = ['tcp_pose_action'] + self.actor_keys
 
         meta = first_buf.root['meta']
         attrs = meta if isinstance(meta, dict) else meta.attrs
@@ -175,14 +176,6 @@ class WristCamGSManiskillDataset(BaseDataset):
             self.per_buffer_val_masks.append(global_val_mask[offset:offset + count])
             offset += count
 
-        # Determine sequence length based on representation space
-        # For relative_ee_pose, we sample horizon + 1 to compute action[t] = pose[t+1]
-        seq_len = horizon + 1 if representation_space == "relative_ee_pose" else horizon
-        
-        # If we ask the sampler for 1 extra step, we must allow 1 extra padded step at the end 
-        # so that we don't drop the last sample of every episode!
-        actual_pad_after = pad_after + 1 if representation_space == "relative_ee_pose" else pad_after
-
         # =====================================================================
         # Create per-buffer samplers for training
         # =====================================================================
@@ -190,9 +183,9 @@ class WristCamGSManiskillDataset(BaseDataset):
         for buf, train_mask in zip(self.replay_buffers, self.per_buffer_train_masks):
             self.samplers.append(SequenceSampler(
                 replay_buffer=buf,
-                sequence_length=seq_len,
+                sequence_length=horizon,
                 pad_before=pad_before,
-                pad_after=actual_pad_after,
+                pad_after=pad_after,
                 episode_mask=train_mask,
                 keys=self.full_seq_keys
             ))
@@ -203,12 +196,23 @@ class WristCamGSManiskillDataset(BaseDataset):
             
         self.global_train_mask = global_train_mask
         self.horizon = horizon
-        self.seq_len = seq_len
         self.pad_before = pad_before
         self.pad_after = pad_after
-        self.actual_pad_after = actual_pad_after
 
         self.min_opacity = min_opacity
+        # Validate: config min_opacity must be >= the dataset's min_opacity.
+        for i, buf in enumerate(self.replay_buffers):
+            m = buf.root['meta']
+            a = m if isinstance(m, dict) else m.attrs
+            dataset_min_opacity = a.get('min_opacity', None)
+            if dataset_min_opacity is not None and min_opacity < dataset_min_opacity:
+                raise ValueError(
+                    f"Config min_opacity ({min_opacity}) is below the dataset's "
+                    f"min_opacity ({dataset_min_opacity}) in dataset {i} "
+                    f"({self.zarr_paths[i]}). During evaluation the policy would "
+                    f"see Gaussians that were pruned during training. "
+                    f"Set min_opacity >= {dataset_min_opacity}."
+                )
         
         n_buf = len(self.replay_buffers)
         print(f"[WristCamGSManiskillDataset] Loaded {n_buf} zarr dataset(s), "
@@ -252,15 +256,15 @@ class WristCamGSManiskillDataset(BaseDataset):
             init_state['actor_poses'] = {
                 k: buf[k][start_idx] for k in self.actor_keys
             }
-        init_state['agent_pos'] = buf['state'][start_idx]
+        init_state['agent_pos'] = buf['joint_pos_proprio'][start_idx]
         
         if self.representation_space == "abs_joint_pos":
-            expert_trajectory = buf['state'][start_idx:end_idx]
+            expert_trajectory = buf['joint_pos_proprio'][start_idx:end_idx]
         elif self.representation_space == "relative_ee_pose":
-            # tcp_pose: (T, 7) [x,y,z,qw,qx,qy,qz], gripper: last 2 dims of state
-            tcp_pose = buf['tcp_pose'][start_idx:end_idx]
-            gripper_state = buf['state'][start_idx:end_idx][:, -2:]
-            expert_trajectory = np.concatenate([tcp_pose, gripper_state], axis=-1)  # (T, 9)
+            # tcp_pose_proprio: (T, 7) [x,y,z,qw,qx,qy,qz], gripper: last 2 dims of joint_pos_proprio
+            tcp_pose_proprio = buf['tcp_pose_proprio'][start_idx:end_idx]
+            gripper_state = buf['joint_pos_proprio'][start_idx:end_idx][:, -2:]
+            expert_trajectory = np.concatenate([tcp_pose_proprio, gripper_state], axis=-1)  # (T, 9)
         
         return init_state, expert_trajectory
 
@@ -273,9 +277,9 @@ class WristCamGSManiskillDataset(BaseDataset):
         for buf, val_mask in zip(self.replay_buffers, self.per_buffer_val_masks):
             val_set.samplers.append(SequenceSampler(
                 replay_buffer=buf,
-                sequence_length=self.seq_len,
+                sequence_length=self.horizon,
                 pad_before=self.pad_before,
-                pad_after=self.actual_pad_after,
+                pad_after=self.pad_after,
                 episode_mask=val_mask,
                 keys=self.full_seq_keys,
             ))
@@ -327,7 +331,7 @@ class WristCamGSManiskillDataset(BaseDataset):
         # Stream over ALL buffers sequentially
         for buf_i, buf in enumerate(self.replay_buffers):
             norm_mask = self.per_buffer_train_masks[buf_i]
-            norm_keys = ['action', 'state', 'gsplats']      # actor poses are only used for reproducing init states
+            norm_keys = ['joint_pos_action', 'joint_pos_proprio', 'gsplats']      # actor poses are only used for reproducing init states
             normalization_sampler = SequenceSampler(
                 replay_buffer=buf, 
                 sequence_length=1, pad_before=0, pad_after=0,
@@ -474,8 +478,10 @@ class WristCamGSManiskillDataset(BaseDataset):
 
         # Probe feature dimensions from first sample
         probe_sample = self.samplers[0].sample_sequence(0)
-        probe_sample['state'] = self._get_synced_obs_slice(
-            self.samplers[0].indices[0], self.state_arrays[0], name="state")
+        probe_sample['joint_pos_proprio'] = self._get_synced_obs_slice(
+            self.samplers[0].indices[0], self.joint_pos_proprio_arrays[0], name="joint_pos_proprio")
+        probe_sample['tcp_pose_proprio'] = self._get_synced_obs_slice(
+            self.samplers[0].indices[0], self.tcp_pose_proprio_arrays[0], name="tcp_pose_proprio")
         probe_sample['gsplats'] = self._get_synced_obs_slice(
             self.samplers[0].indices[0], self.gsplats_arrays[0], name="gsplats")
         probe_data = self._sample_to_data(probe_sample)
@@ -498,9 +504,9 @@ class WristCamGSManiskillDataset(BaseDataset):
             norm_mask = self.per_buffer_train_masks[buf_i]
             normalization_sampler = SequenceSampler(
                 replay_buffer=buf,
-                sequence_length=self.seq_len,
+                sequence_length=self.horizon,
                 pad_before=self.pad_before,
-                pad_after=self.actual_pad_after,
+                pad_after=self.pad_after,
                 episode_mask=norm_mask,
                 keys=self.full_seq_keys,  # sampler only handles these keys
             )
@@ -513,8 +519,10 @@ class WristCamGSManiskillDataset(BaseDataset):
             for idx in tqdm(range(len(normalization_sampler)), desc=desc):
                 sample = normalization_sampler.sample_sequence(idx)
                 raw_indices = normalization_sampler.indices[idx]
-                sample['state'] = self._get_synced_obs_slice(
-                    raw_indices, self.state_arrays[buf_i], name="state")
+                sample['joint_pos_proprio'] = self._get_synced_obs_slice(
+                    raw_indices, self.joint_pos_proprio_arrays[buf_i], name="joint_pos_proprio")
+                sample['tcp_pose_proprio'] = self._get_synced_obs_slice(
+                    raw_indices, self.tcp_pose_proprio_arrays[buf_i], name="tcp_pose_proprio")
                 sample['gsplats'] = self._get_synced_obs_slice(
                     raw_indices, self.gsplats_arrays[buf_i], name="gsplats")
 
@@ -792,8 +800,8 @@ class WristCamGSManiskillDataset(BaseDataset):
             # =====================================================
             # Absolute joint position mode
             # =====================================================
-            agent_proprio = torch.from_numpy(sample['state'])
-            action = torch.from_numpy(sample['action'])
+            agent_proprio = torch.from_numpy(sample['joint_pos_proprio'])
+            action = torch.from_numpy(sample['joint_pos_action'])
             
             obs_dict = {'agent_proprio': agent_proprio}
             
@@ -815,14 +823,13 @@ class WristCamGSManiskillDataset(BaseDataset):
             # All quantities expressed relative to the anchor ("current time") frame
             # =====================================================
             
-            tcp_pose = sample['tcp_pose'].astype(np.float32)     # (horizon + 1, 7)
-            tcp_pose_obs = tcp_pose[:self.n_obs_steps]           # (n_obs_steps, 7)
-            qpos = sample['state'].astype(np.float32)                   # (n_obs_steps, 9)
-            absolute_joint_pos_action = sample['action'].astype(np.float32)             # (horizon + 1, 8)
-            gsplats = gsplats.astype(np.float32)                         # (n_obs_steps, N, D)
+            tcp_pose_proprio = sample['tcp_pose_proprio'].astype(np.float32)   # (n_obs_steps, 7)
+            tcp_pose_action = sample['tcp_pose_action'].astype(np.float32)     # (horizon, 8) = 7D pose + 1D gripper
+            joint_pos_proprio = sample['joint_pos_proprio'].astype(np.float32)  # (n_obs_steps, 9)
+            gsplats = gsplats.astype(np.float32)                                # (n_obs_steps, N, D)
 
             # --- Anchor frame: TCP at the last observation step ---
-            T_anchor_tcp_to_base = _pose7_to_mat_np(tcp_pose_obs[-1])          # (4, 4)
+            T_anchor_tcp_to_base = _pose7_to_mat_np(tcp_pose_proprio[-1])      # (4, 4)
             T_anchor_base_to_tcp = np.linalg.inv(T_anchor_tcp_to_base)           # (4, 4)
             R_anchor_base_to_tcp = T_anchor_base_to_tcp[:3, :3]                # (3, 3)
             t_anchor_base_to_tcp = T_anchor_base_to_tcp[:3, 3]                 # (3,)
@@ -868,24 +875,23 @@ class WristCamGSManiskillDataset(BaseDataset):
 
             # --- Proprioception: relative EE pose + gripper ---
             # pos(3) + rot6d(6) + gripper(2) = 11D per obs step
-            T_obs_tcp_to_base = _pose7_to_mat_np(tcp_pose_obs)       # (n_obs_steps, 4, 4)
-            T_relative_tcp = T_anchor_base_to_tcp[None, :, :] @ T_obs_tcp_to_base   # (n_obs_steps, 4, 4)
+            T_tcp_pose_proprio_to_base = _pose7_to_mat_np(tcp_pose_proprio)   # (n_obs_steps, 4, 4)
+            T_relative_tcp = T_anchor_base_to_tcp[None, :, :] @ T_tcp_pose_proprio_to_base   # (n_obs_steps, 4, 4)
             rel_tcp_pose9d = _mat_to_pose9d_np(T_relative_tcp)  # (n_obs_steps, 9) 
-            gripper_pos = qpos[:, -2:]                       # (n_obs_steps, 2), absolute gripper position
+            gripper_pos = joint_pos_proprio[:, -2:]          # (n_obs_steps, 2), absolute gripper position
             agent_proprio_np = np.concatenate([rel_tcp_pose9d, gripper_pos], axis=-1)  # (n_obs_steps, 11)
             obs_dict['agent_proprio'] = torch.from_numpy(agent_proprio_np)
 
             # --- 3. Actions: relative EE pose + gripper ---
             # pos(3) + rot6d(6) + gripper(1) = 10D per action step
             
-            # Shift by 1: the action at time t is the pose at t+1
-            target_tcp_poses = tcp_pose[1:self.horizon + 1]   # (horizon, 7)
+            # Split tcp_pose_action into pose (7D) and gripper (1D)
+            tcp_pose_action_7d = tcp_pose_action[:, :7]   # (horizon, 7)
+            gripper_action = tcp_pose_action[:, 7:]     # (horizon, 1)
             
-            target_tcp_to_base = _pose7_to_mat_np(target_tcp_poses)   # (horizon, 4, 4)
-            T_rel_action = T_anchor_base_to_tcp[None, :, :] @ target_tcp_to_base # (horizon, 4, 4)
+            T_tcp_pose_action_to_base = _pose7_to_mat_np(tcp_pose_action_7d)   # (horizon, 4, 4)
+            T_rel_action = T_anchor_base_to_tcp[None, :, :] @ T_tcp_pose_action_to_base # (horizon, 4, 4)
             rel_action_pose9d = _mat_to_pose9d_np(T_rel_action)  # (horizon, 9)
-            # NOTE: using the abs gripper action extracted from the recorded abs joint pos actions
-            gripper_action = absolute_joint_pos_action[:self.horizon, -1:]                   # (horizon, 1)
             action_np = np.concatenate([rel_action_pose9d, gripper_action], axis=-1)  # (horizon, 10)
             action = torch.from_numpy(action_np)
 
@@ -920,7 +926,10 @@ class WristCamGSManiskillDataset(BaseDataset):
         raw_indices = self.samplers[buf_idx].indices[local_idx]
         t_5 = time.time()
         
-        sample['state'] = self._get_synced_obs_slice(raw_indices, self.state_arrays[buf_idx], name="state")
+        # needed in relative_ee_pose for gripper state!
+        sample['joint_pos_proprio'] = self._get_synced_obs_slice(raw_indices, self.joint_pos_proprio_arrays[buf_idx], name="joint_pos_proprio")
+        if self.representation_space == "relative_ee_pose":
+            sample['tcp_pose_proprio'] = self._get_synced_obs_slice(raw_indices, self.tcp_pose_proprio_arrays[buf_idx], name="tcp_pose_proprio")
         sample['gsplats'] = self._get_synced_obs_slice(raw_indices, self.gsplats_arrays[buf_idx], name="gsplats")
         t_6 = time.time()
 
@@ -1011,24 +1020,24 @@ if __name__ == "__main__":
         # Test Normalization
         # =========================================================
         print(f"\n--- Testing Normalizer ({dataset.representation_space}) ---")
-        normalizer = dataset.get_normalizer()
+        # normalizer = dataset.get_normalizer()
         
         # Grab one batch to test normalization
-        batch = next(iter(train_dataloader))
-        print("Got test batch. Normalizing...")
+        # batch = next(iter(train_dataloader))
+        # print("Got test batch. Normalizing...")
         
         # The normalizer expects a dict with keys matching its params_dict
-        test_dict = {
-            'action': batch['action'],
-            'agent_proprio': batch['obs']['agent_proprio'],
-        }
-        if 'positions' in dataset.gs_params:
-            test_dict['gs_positions'] = batch['obs']['gs_positions']
+        # test_dict = {
+        #     'action': batch['action'],
+        #     'agent_proprio': batch['obs']['agent_proprio'],
+        # }
+        # if 'positions' in dataset.gs_params:
+        #     test_dict['gs_positions'] = batch['obs']['gs_positions']
             
-        normalized_dict = normalizer.normalize(test_dict)
+        # normalized_dict = normalizer.normalize(test_dict)
         
-        for k, v in normalized_dict.items():
-            print(f"  {k}: shape {v.shape}, min={v.min().item():.3f}, max={v.max().item():.3f}")
+        # for k, v in normalized_dict.items():
+        #     print(f"  {k}: shape {v.shape}, min={v.min().item():.3f}, max={v.max().item():.3f}")
         # =========================================================
 
         # Test loading for 3 epochs

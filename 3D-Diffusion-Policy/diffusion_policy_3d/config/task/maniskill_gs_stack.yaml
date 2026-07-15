@@ -5,7 +5,7 @@ defaults:
 
 name: maniskill_gs_stack
 num_gaussians: 1024
-min_opacity: 0.9
+min_opacity: 0.98
 
 shape_meta: &shape_meta
   obs:
