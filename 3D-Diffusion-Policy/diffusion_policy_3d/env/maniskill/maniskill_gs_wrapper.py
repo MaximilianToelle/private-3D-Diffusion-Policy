@@ -5,8 +5,10 @@ import time
 from functools import partial
 
 import viser
+from pytorch3d.transforms import matrix_to_quaternion
 from gsworld.mani_skill.utils.gsplat_viewer.gsplat_viewer import GsplatViewer
 from gsworld.mani_skill.utils.gsplat_viewer.utils_rasterize_render import _viewer_render_fn, _on_connect
+from diffusion_policy_3d.common.transform_utils import quaternion_to_matrix_torch
 
 
 class GSManiskillDP3Wrapper(gym.Env):
@@ -147,7 +149,7 @@ class GSManiskillDP3Wrapper(gym.Env):
             
             # Converting to 9d rotation matrix for encoding
             quats = torch.nn.functional.normalize(quats, dim=-1)
-            rotations_9d = quaternion_to_matrix(quats).reshape(-1, 9)
+            rotations_9d = quaternion_to_matrix_torch(quats).reshape(-1, 9)
             gsplat_data["gs_rotations_9d"].append(rotations_9d)
 
             gsplat_data["gs_log_scales"].append(log_scales.view(-1, 3))
@@ -325,94 +327,3 @@ class GSManiskillDP3Wrapper(gym.Env):
         if hasattr(self, '_last_rgb'):
             return self._last_rgb.cpu().numpy()
         return torch.zeros((256, 256, 3), dtype=torch.uint8).numpy()
-
-
-def quaternion_to_matrix(quaternions: torch.Tensor) -> torch.Tensor:
-    """
-    Convert rotations given as quaternions to rotation matrices.
-    Args:
-        quaternions: quaternions with real part first,
-            as tensor of shape (..., 4).
-    Returns:
-        Rotation matrices as tensor of shape (..., 3, 3).
-    """
-    r, i, j, k = torch.unbind(quaternions, -1)
-    two_s = 2.0 / (quaternions * quaternions).sum(-1)
-
-    o = torch.stack(
-        (
-            1 - two_s * (j * j + k * k),
-            two_s * (i * j - k * r),
-            two_s * (i * k + j * r),
-            two_s * (i * j + k * r),
-            1 - two_s * (i * i + k * k),
-            two_s * (j * k - i * r),
-            two_s * (i * k - j * r),
-            two_s * (j * k + i * r),
-            1 - two_s * (i * i + j * j),
-        ),
-        -1,
-    )
-    return o.reshape(quaternions.shape[:-1] + (3, 3))
-
-
-def matrix_to_quaternion(matrix: torch.Tensor) -> torch.Tensor:
-    """
-    Convert rotations given as rotation matrices to quaternions.
-
-    Args:
-        matrix: Rotation matrices as tensor of shape (..., 3, 3).
-
-    Returns:
-        quaternions with real part first, as tensor of shape (..., 4).
-        The returned quaternions have a positive real part.
-    """
-    if matrix.size(-1) != 3 or matrix.size(-2) != 3:
-        raise ValueError(f"Invalid rotation matrix shape {matrix.shape}.")
-
-    batch_dim = matrix.shape[:-2]
-    m00, m01, m02, m10, m11, m12, m20, m21, m22 = torch.unbind(
-        matrix.reshape(batch_dim + (9,)), dim=-1
-    )
-
-    q_abs = torch.sqrt(torch.clamp(
-        torch.stack(
-            [
-                1.0 + m00 + m11 + m22,
-                1.0 + m00 - m11 - m22,
-                1.0 - m00 + m11 - m22,
-                1.0 - m00 - m11 + m22,
-            ],
-            dim=-1,
-        ), min=0.0
-    ))
-
-    # we produce the desired quaternion multiplied by each of r, i, j, k
-    quat_by_rijk = torch.stack(
-        [
-            torch.stack(
-                [torch.square(q_abs[..., 0]), m21 - m12, m02 - m20, m10 - m01], dim=-1
-            ),
-            torch.stack(
-                [m21 - m12, torch.square(q_abs[..., 1]), m10 + m01, m02 + m20], dim=-1
-            ),
-            torch.stack(
-                [m02 - m20, m10 + m01, torch.square(q_abs[..., 2]), m12 + m21], dim=-1
-            ),
-            torch.stack(
-                [m10 - m01, m20 + m02, m21 + m12, torch.square(q_abs[..., 3])], dim=-1
-            ),
-        ],
-        dim=-2,
-    )
-
-    flr = torch.tensor(0.1).to(dtype=q_abs.dtype, device=q_abs.device)
-    quat_candidates = quat_by_rijk / (2.0 * q_abs[..., None].max(flr))
-
-    indices = q_abs.argmax(dim=-1, keepdim=True)
-    expand_dims = list(batch_dim) + [1, 4]
-    gather_indices = indices.unsqueeze(-1).expand(expand_dims)
-    out = torch.gather(quat_candidates, -2, gather_indices).squeeze(-2)
-    
-    # Standardize to ensure positive real part
-    return torch.where(out[..., 0:1] < 0, -out, out)

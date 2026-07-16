@@ -13,7 +13,7 @@ from diffusion_policy_3d.common.sampler import (
     SequenceSampler, get_val_mask, downsample_mask)
 from diffusion_policy_3d.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer, PerTimestepLinearNormalizer
 from diffusion_policy_3d.dataset.base_dataset import BaseDataset
-from diffusion_policy_3d.dataset.dataset_utils import _pose7_to_mat_np, _mat_to_pose9d_np
+from diffusion_policy_3d.common.transform_utils import pose7_to_mat_np, mat_to_pose9d_np
 
 from pytorch3d.ops import sample_farthest_points
 
@@ -836,7 +836,7 @@ class WristCamGSManiskillDataset(BaseDataset):
             gsplats = gsplats.astype(np.float32)                                # (n_obs_steps, N, D)
 
             # --- Anchor frame: TCP at the last observation step ---
-            T_anchor_tcp_to_base = _pose7_to_mat_np(tcp_pose_proprio[-1])      # (4, 4)
+            T_anchor_tcp_to_base = pose7_to_mat_np(tcp_pose_proprio[-1])      # (4, 4)
             T_anchor_base_to_tcp = np.linalg.inv(T_anchor_tcp_to_base)           # (4, 4)
             R_anchor_base_to_tcp = T_anchor_base_to_tcp[:3, :3]                # (3, 3)
             t_anchor_base_to_tcp = T_anchor_base_to_tcp[:3, 3]                 # (3,)
@@ -882,9 +882,9 @@ class WristCamGSManiskillDataset(BaseDataset):
 
             # --- Proprioception: relative EE pose + gripper ---
             # pos(3) + rot6d(6) + gripper(2) = 11D per obs step
-            T_tcp_pose_proprio_to_base = _pose7_to_mat_np(tcp_pose_proprio)   # (n_obs_steps, 4, 4)
+            T_tcp_pose_proprio_to_base = pose7_to_mat_np(tcp_pose_proprio)   # (n_obs_steps, 4, 4)
             T_relative_tcp = T_anchor_base_to_tcp[None, :, :] @ T_tcp_pose_proprio_to_base   # (n_obs_steps, 4, 4)
-            rel_tcp_pose9d = _mat_to_pose9d_np(T_relative_tcp)  # (n_obs_steps, 9) 
+            rel_tcp_pose9d = mat_to_pose9d_np(T_relative_tcp)  # (n_obs_steps, 9) 
             gripper_pos = joint_pos_proprio[:, -2:]          # (n_obs_steps, 2), absolute gripper position
             agent_proprio_np = np.concatenate([rel_tcp_pose9d, gripper_pos], axis=-1)  # (n_obs_steps, 11)
             obs_dict['agent_proprio'] = torch.from_numpy(agent_proprio_np)
@@ -896,9 +896,9 @@ class WristCamGSManiskillDataset(BaseDataset):
             tcp_pose_action_7d = tcp_pose_action[:, :7]   # (horizon, 7)
             gripper_action = tcp_pose_action[:, 7:]     # (horizon, 1)
             
-            T_tcp_pose_action_to_base = _pose7_to_mat_np(tcp_pose_action_7d)   # (horizon, 4, 4)
+            T_tcp_pose_action_to_base = pose7_to_mat_np(tcp_pose_action_7d)   # (horizon, 4, 4)
             T_rel_action = T_anchor_base_to_tcp[None, :, :] @ T_tcp_pose_action_to_base # (horizon, 4, 4)
-            rel_action_pose9d = _mat_to_pose9d_np(T_rel_action)  # (horizon, 9)
+            rel_action_pose9d = mat_to_pose9d_np(T_rel_action)  # (horizon, 9)
             action_np = np.concatenate([rel_action_pose9d, gripper_action], axis=-1)  # (horizon, 10)
             action = torch.from_numpy(action_np)
 
