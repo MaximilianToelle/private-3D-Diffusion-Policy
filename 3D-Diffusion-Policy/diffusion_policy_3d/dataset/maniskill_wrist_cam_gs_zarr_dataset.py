@@ -511,56 +511,63 @@ class WristCamGSManiskillDataset(BaseDataset):
                 keys=self.full_seq_keys,  # sampler only handles these keys
             )
 
-            # Accumulate raw values for this single dataset
-            dataset_agent_proprio_vals = []
-            dataset_action_vals = []
-            dataset_gs_positions_vals = []
             desc = f"Collecting stats from dataset {buf_i+1}/{len(self.replay_buffers)}"
-            for idx in tqdm(range(len(normalization_sampler)), desc=desc):
-                sample = normalization_sampler.sample_sequence(idx)
-                raw_indices = normalization_sampler.indices[idx]
-                sample['joint_pos_proprio'] = self._get_synced_obs_slice(
-                    raw_indices, self.joint_pos_proprio_arrays[buf_i], name="joint_pos_proprio")
-                sample['tcp_pose_proprio'] = self._get_synced_obs_slice(
-                    raw_indices, self.tcp_pose_proprio_arrays[buf_i], name="tcp_pose_proprio")
-                sample['gsplats'] = self._get_synced_obs_slice(
-                    raw_indices, self.gsplats_arrays[buf_i], name="gsplats")
+            
+            chunk_size = 1000
+            sampler_len = len(normalization_sampler)
+            
+            for chunk_start in range(0, sampler_len, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, sampler_len)
+                
+                dataset_agent_proprio_vals = []
+                dataset_action_vals = []
+                dataset_gs_positions_vals = []
+                
+                for idx in tqdm(range(chunk_start, chunk_end), desc=f"{desc} (chunk {chunk_start//chunk_size + 1}/{(sampler_len + chunk_size - 1)//chunk_size})"):
+                    sample = normalization_sampler.sample_sequence(idx)
+                    raw_indices = normalization_sampler.indices[idx]
+                    sample['joint_pos_proprio'] = self._get_synced_obs_slice(
+                        raw_indices, self.joint_pos_proprio_arrays[buf_i], name="joint_pos_proprio")
+                    sample['tcp_pose_proprio'] = self._get_synced_obs_slice(
+                        raw_indices, self.tcp_pose_proprio_arrays[buf_i], name="tcp_pose_proprio")
+                    sample['gsplats'] = self._get_synced_obs_slice(
+                        raw_indices, self.gsplats_arrays[buf_i], name="gsplats")
 
-                torch_data = self._sample_to_data(sample, min_opacity=self.min_opacity) 
+                    torch_data = self._sample_to_data(sample, min_opacity=self.min_opacity) 
 
-                dataset_agent_proprio_vals.append(torch_data['obs']['agent_proprio'][..., :3])        # (T_obs, 3)
-                dataset_action_vals.append(torch_data['action'][..., :3])                     # (T_horizon, 3)
-                dataset_gs_positions_vals.append(torch_data['obs']['gs_positions'])  # (T_obs, N_gaussians, 3)
+                    dataset_agent_proprio_vals.append(torch_data['obs']['agent_proprio'][..., :3])        # (T_obs, 3)
+                    dataset_action_vals.append(torch_data['action'][..., :3])                     # (T_horizon, 3)
+                    dataset_gs_positions_vals.append(torch_data['obs']['gs_positions'])  # (T_obs, N_gaussians, 3)
 
-            if len(dataset_agent_proprio_vals) == 0:
-                continue
+                if len(dataset_agent_proprio_vals) == 0:
+                    continue
 
-            # Stack this dataset's samples, extract per (t, d), sort, and store
-            # the compact sorted 1D tensors. Then delete the raw 
-            # tensors to free memory before processing the next dataset.
-            agent_proprio_stacked = torch.stack(dataset_agent_proprio_vals, dim=0)  # (N_samples, T_obs, D_agent_proprio)
-            for t in range(T_obs):
-                for d in range(3):
-                    agent_proprio_sorted_chunks[t][d].append(
-                        agent_proprio_stacked[:, t, d].contiguous().sort()[0])
-            del dataset_agent_proprio_vals, agent_proprio_stacked
+                # Stack this chunk's samples, extract per (t, d), sort, and store
+                # the compact sorted 1D tensors. Then delete the raw 
+                # tensors to free memory before processing the next chunk.
+                agent_proprio_stacked = torch.stack(dataset_agent_proprio_vals, dim=0)  # (N_chunk, T_obs, D_agent_proprio)
+                for t in range(T_obs):
+                    for d in range(3):
+                        agent_proprio_sorted_chunks[t][d].append(
+                            agent_proprio_stacked[:, t, d].contiguous().sort()[0])
+                del dataset_agent_proprio_vals, agent_proprio_stacked
 
-            action_stacked = torch.stack(dataset_action_vals, dim=0)  # (N_samples, T_horizon, D_action)
-            for t in range(T_horizon):
-                for d in range(3):
-                    action_sorted_chunks[t][d].append(
-                        action_stacked[:, t, d].contiguous().sort()[0])
-            del dataset_action_vals, action_stacked
+                action_stacked = torch.stack(dataset_action_vals, dim=0)  # (N_chunk, T_horizon, D_action)
+                for t in range(T_horizon):
+                    for d in range(3):
+                        action_sorted_chunks[t][d].append(
+                            action_stacked[:, t, d].contiguous().sort()[0])
+                del dataset_action_vals, action_stacked
 
-            # gs_positions: each sample has (T_obs, N_gaussians, 3) with fixed N_gaussians.
-            # We stack along a new sample dimension, then flatten over both samples and
-            # Gaussians to get all values for a given (t, d).
-            gs_positions_stacked = torch.stack(dataset_gs_positions_vals, dim=0)  # (N_samples, T_obs, N_gaussians, 3)
-            for t in range(T_obs):
-                for d in range(D_gs_positions):
-                    gs_positions_sorted_chunks[t][d].append(
-                        gs_positions_stacked[:, t, :, d].flatten().sort()[0])
-            del dataset_gs_positions_vals, gs_positions_stacked
+                # gs_positions: each sample has (T_obs, N_gaussians, 3) with fixed N_gaussians.
+                # We stack along a new sample dimension, then flatten over both samples and
+                # Gaussians to get all values for a given (t, d).
+                gs_positions_stacked = torch.stack(dataset_gs_positions_vals, dim=0)  # (N_chunk, T_obs, N_gaussians, 3)
+                for t in range(T_obs):
+                    for d in range(D_gs_positions):
+                        gs_positions_sorted_chunks[t][d].append(
+                            gs_positions_stacked[:, t, :, d].flatten().sort()[0])
+                del dataset_gs_positions_vals, gs_positions_stacked
 
         # =====================================================================
         # Phase 2: Compute percentile over datasets via binary search
@@ -650,8 +657,8 @@ class WristCamGSManiskillDataset(BaseDataset):
             action_sorted_chunks, T_horizon, 3, lower_percentile, upper_percentile)
         
         p02_action[:, :3] = p02_action_pos
-        p98_action[:, :3] = p98_action_pos    
-        
+        p98_action[:, :3] = p98_action_pos
+
         normalizer['action'] = PerTimestepLinearNormalizer.create_clamped_percentile_normalizer(
             p02=p02_action, p98=p98_action,
             n_timesteps=T_horizon, n_features=D_action,
@@ -1020,24 +1027,24 @@ if __name__ == "__main__":
         # Test Normalization
         # =========================================================
         print(f"\n--- Testing Normalizer ({dataset.representation_space}) ---")
-        # normalizer = dataset.get_normalizer()
+        normalizer = dataset.get_normalizer()
         
         # Grab one batch to test normalization
-        # batch = next(iter(train_dataloader))
-        # print("Got test batch. Normalizing...")
+        batch = next(iter(train_dataloader))
+        print("Got test batch. Normalizing...")
         
         # The normalizer expects a dict with keys matching its params_dict
-        # test_dict = {
-        #     'action': batch['action'],
-        #     'agent_proprio': batch['obs']['agent_proprio'],
-        # }
-        # if 'positions' in dataset.gs_params:
-        #     test_dict['gs_positions'] = batch['obs']['gs_positions']
+        test_dict = {
+            'action': batch['action'],
+            'agent_proprio': batch['obs']['agent_proprio'],
+        }
+        if 'positions' in dataset.gs_params:
+            test_dict['gs_positions'] = batch['obs']['gs_positions']
             
-        # normalized_dict = normalizer.normalize(test_dict)
+        normalized_dict = normalizer.normalize(test_dict)
         
-        # for k, v in normalized_dict.items():
-        #     print(f"  {k}: shape {v.shape}, min={v.min().item():.3f}, max={v.max().item():.3f}")
+        for k, v in normalized_dict.items():
+            print(f"  {k}: shape {v.shape}, min={v.min().item():.3f}, max={v.max().item():.3f}")
         # =========================================================
 
         # Test loading for 3 epochs
