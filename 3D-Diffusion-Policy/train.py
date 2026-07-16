@@ -214,9 +214,21 @@ class TrainDP3Workspace:
                 t_before_next_batch = time.time()
                 for batch_idx, batch in enumerate(tepoch):
                     t1 = time.time()
-                   
-                    # device transfer
+
+                    # device transfer.
+                    # The copy is async (non_blocking=True), so CPU wall-clock (t1_1 - t1) only
+                    # measures the LAUNCH, not the copy — and the copy's real cost would otherwise
+                    # leak into the next op's timing. We measure the true GPU transfer time with
+                    # CUDA events (recorded on the stream, no CPU stall); we read elapsed_time later
+                    # inside `if verbose` after a natural sync (loss.backward / .item), so NO extra
+                    # synchronize is added to the hot path.
+                    if verbose and torch.cuda.is_available():
+                        h2d_start = torch.cuda.Event(enable_timing=True)
+                        h2d_end = torch.cuda.Event(enable_timing=True)
+                        h2d_start.record()
                     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                    if verbose and torch.cuda.is_available():
+                        h2d_end.record()
                     t1_1 = time.time()
 
                     # augmentations
@@ -291,7 +303,14 @@ class TrainDP3Workspace:
                     if verbose:
                         print(f" total one step time: {t1_7-t_before_next_batch:.3f}")
                         print(f" batch generation time {t1-t_before_next_batch:.3f}")
-                        print(f" device transfer time: {t1_1-t1:.3f}")
+                        # True GPU H2D transfer time (CUDA events). At this point loss.backward()
+                        # and the logging .item() have already synced the stream, so reading the
+                        # event does not add a stall. The CPU-side numbers below (t1_1-t1 launch,
+                        # t1_2-t1_1 augment) are kept for reference but are NOT the transfer cost.
+                        if torch.cuda.is_available():
+                            h2d_ms = h2d_start.elapsed_time(h2d_end)  # milliseconds
+                            print(f" device transfer time (GPU, cuda-event): {h2d_ms/1000:.3f}")
+                        print(f" device transfer launch (cpu): {t1_1-t1:.3f}")
                         print(f" augmentations time: {t1_2-t1_1:.3f}")
                         print(f" compute loss time: {t1_3-t1_2:.3f}")
                         print(f" diagnostic metrics time: {t1_4-t1_3:.3f}")

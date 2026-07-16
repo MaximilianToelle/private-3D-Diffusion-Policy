@@ -4,6 +4,13 @@ defaults:
 
 name: maniskill_wrist_cam_gs_stack
 
+# The wrist_cam dataset (WristCamGSManiskillDataset) does the active+high-opacity filter and
+# downsample to num_gaussians on the cpu inside __getitem__ (gaussian_selection="subsample")
+# -> massive batch loading speedup 
+# Add other GPU augmentations here if needed
+train_data_augmentations: []
+val_data_augmentations: []
+
 env_runner:
   _target_: diffusion_policy_3d.env_runner.maniskill_wrist_cam_gs_runner.WristCamGSManiSkillRunner
   task_name: StackFr3WristCamSimpleEnv-v1

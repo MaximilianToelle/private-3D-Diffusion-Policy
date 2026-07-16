@@ -67,11 +67,13 @@ class WristCamGSManiskillDataset(BaseDataset):
         val_ratio=0.0,
         max_train_episodes=None,
         representation_space="abs_joint_pos",  # abs_joint_pos | relative_ee_pose
-        min_opacity=0.,     # provide for accurate Gaussian normalization
+        min_opacity=0.,       # Gaussians below this opacity are pruned during subsampling / normalization
+        num_gaussians=1024,   # K: number of Gaussians kept per sample after CPU subsampling
         verbose=False,
     ):
         super().__init__()
         self.n_obs_steps = n_obs_steps
+        self.num_gaussians = num_gaussians
         self.verbose = verbose
         assert representation_space in ("abs_joint_pos", "relative_ee_pose"), \
             f"representation_space must be 'abs_joint_pos' or 'relative_ee_pose', got '{representation_space}'"
@@ -343,9 +345,9 @@ class WristCamGSManiskillDataset(BaseDataset):
             desc = f"Streaming dataset {buf_i+1}/{len(self.replay_buffers)} for normalization stats"
             for idx in tqdm(indices, desc=desc):
                 sample = normalization_sampler.sample_sequence(idx)
-                torch_data = self._sample_to_data(sample, min_opacity=self.min_opacity)
+                torch_data = self._sample_to_data(sample, gaussian_selection="opacity_filter")
                 obs = torch_data['obs']
-                
+
                 update_min_max('action', torch_data['action'])
                 update_min_max('agent_proprio', obs['agent_proprio'])
                 if 'positions' in self.gs_params:
@@ -382,9 +384,9 @@ class WristCamGSManiskillDataset(BaseDataset):
 
         # --- Log Scales (Gaussian Normalization) ---
         if 'log_scales' in self.gs_params:
-            N = stats['gs_log_scales']['count']
-            mean_log_scales = stats['gs_log_scales']['sum'] / N
-            var_log_scales = stats['gs_log_scales']['sum_sq'] / N - (mean_log_scales ** 2)
+            M = stats['gs_log_scales']['count']
+            mean_log_scales = stats['gs_log_scales']['sum'] / M
+            var_log_scales = stats['gs_log_scales']['sum_sq'] / M - (mean_log_scales ** 2)
             std_log_scales = torch.sqrt(torch.clamp(var_log_scales.float(), min=1e-6))
             # Cast to float32 after the math is safe
             mean_log_scales = mean_log_scales.float()
@@ -484,7 +486,7 @@ class WristCamGSManiskillDataset(BaseDataset):
             self.samplers[0].indices[0], self.tcp_pose_proprio_arrays[0], name="tcp_pose_proprio")
         probe_sample['gsplats'] = self._get_synced_obs_slice(
             self.samplers[0].indices[0], self.gsplats_arrays[0], name="gsplats")
-        probe_data = self._sample_to_data(probe_sample)
+        probe_data = self._sample_to_data(probe_sample, gaussian_selection="opacity_filter")
         D_agent_proprio = probe_data['obs']['agent_proprio'].shape[-1]
         D_action = probe_data['action'].shape[-1]
         D_gs_positions = 3
@@ -533,7 +535,9 @@ class WristCamGSManiskillDataset(BaseDataset):
                     sample['gsplats'] = self._get_synced_obs_slice(
                         raw_indices, self.gsplats_arrays[buf_i], name="gsplats")
 
-                    torch_data = self._sample_to_data(sample, min_opacity=self.min_opacity) 
+                    # Assumption: Gaussians are prescanned -> fixed opacities,
+                    # so the filtered count is identical across samples (safe to stack below).
+                    torch_data = self._sample_to_data(sample, gaussian_selection="opacity_filter")
 
                     dataset_agent_proprio_vals.append(torch_data['obs']['agent_proprio'][..., :3])        # (T_obs, 3)
                     dataset_action_vals.append(torch_data['action'][..., :3])                     # (T_horizon, 3)
@@ -718,90 +722,181 @@ class WristCamGSManiskillDataset(BaseDataset):
     def __len__(self) -> int:
         return int(self._cumulative_lengths[-1]) if len(self._cumulative_lengths) > 0 else 0
 
-    def _get_synced_obs_slice(self, raw_indices, zarr_array, name=""):
+    def _get_synced_obs_slice(self, raw_indices, array, name=""):
         """
-        Extracts a short observation history synced to the trajectory sampler.
-        Handles padding automatically if the policy asks for history that doesn't exist 
-        (e.g., at the very first step of an episode).
+        Read the first `n_obs_steps` observation frames for one training sample.
+
+        Key Idea:
+          The SequenceSampler hands us a window sized for the ACTION horizon (`horizon`
+          frames, e.g. 16), because the policy predicts a full horizon of actions. But the
+          policy only CONDITIONS on a short observation history (`n_obs_steps` frames, e.g. 2).
+          So instead of loading all 16 heavy Gaussian frames and throwing 14 away, we read
+          only the first `n_obs_steps` of that window. 
+
+        THE four indices (from SequenceSampler.create_indices) describe the horizon window:
+          - array_start / array_end : the physical row range in `array` that actually
+            exists on this episode (already clamped to episode bounds by the sampler).
+          - pad_before / pad_after  : the window is `[pad_before : pad_after]` filled with real
+            data; slots before `pad_before` and from `pad_after` on are out-of-episode and must
+            be edge-padded (repeat first/last real frame). `pad_before > 0` means the window
+            starts before the episode (near t=0, no history); `pad_after < horizon` means it
+            runs past the episode end.
+
+          We reinterpret these for the SHORTER observation window of length `n_obs_steps`:
+          `pad_before` is exactly the number of leading padding slots our obs window also needs
+          (both windows share the same slot-0 logical time), and real observation frames begin
+          at physical row `array_start`.
         """
         t_start = time.time()
 
-        # 'disk' indices tell us which physical rows to read from the Zarr hard drive array.
-        # 'tensor' indices tell us where to insert that data inside our final obs_slice.
-        disk_start, disk_end, tensor_insert_start, tensor_insert_end = raw_indices
-        
-        # Calculating exact disc read limits
-        # E.g., if we need 2 observation steps, but 'tensor_insert_start' is 1 (meaning 1 slot 
-        # is reserved for padding), we only need max(1, 2 - 1) = 1 real frames from disk
-        num_frames_needed = max(1, self.n_obs_steps - tensor_insert_start)
-        
-        # Failsafe: Never attempt to read past the physical end of the episode data
-        num_frames_needed = min(num_frames_needed, disk_end - disk_start) 
-        
+        array_start, array_end, pad_before, pad_after = raw_indices
+
+        # How many REAL frames must we actually read from `array`?
+        # We want `n_obs_steps` output frames; the first `pad_before` of them are start-padding
+        # (no history), so only `n_obs_steps - pad_before` need real data. Floor at 1 so we
+        # always read at least one frame to pad from, and never read past the episode's real
+        # data (`array_end - array_start`).
+        num_frames_to_read = max(1, self.n_obs_steps - pad_before)
+        num_frames_to_read = min(num_frames_to_read, array_end - array_start)
+
         t_before_read = time.time()
-        raw_disk_frames = zarr_array[disk_start : disk_start + num_frames_needed]
+        real_frames = array[array_start : array_start + num_frames_to_read]
         t_after_read = time.time()
-        
+
+        # Output buffer, one row per observation step (missing rows get padded below).
         obs_slice = np.zeros(
-            (self.n_obs_steps,) + raw_disk_frames.shape[1:], 
-            dtype=raw_disk_frames.dtype
+            (self.n_obs_steps,) + real_frames.shape[1:],
+            dtype=real_frames.dtype,
         )
-        
-        # =====================================================================
-        # CASE A: Start-of-episode padding (missing history)
-        # Condition: `tensor_insert_start > 0`
-        # Meaning: The real data must start later in the tensor because we are at 
-        # the beginning of the episode (e.g., t=0) and past history doesn't exist.
-        # Action: Duplicate the very first available frame backwards in time.
-        # =====================================================================
-        if tensor_insert_start > 0:
-            pad_count = min(tensor_insert_start, self.n_obs_steps)
-            obs_slice[:pad_count] = raw_disk_frames[0]
-            
-        # =====================================================================
-        # CASE B: inserting real data chronologically
-        # Condition: `tensor_insert_start < self.n_obs_steps`
-        # Meaning: Our observation window is wide enough that at least some 
-        # real data belongs in it. (If it were False, the window would be 100% padding).
-        # Action: Drop the real frames into their proper chronological slots.
-        # =====================================================================
-        if tensor_insert_start < self.n_obs_steps:
-            real_data_count = min(self.n_obs_steps - tensor_insert_start, num_frames_needed)
-            insert_end = tensor_insert_start + real_data_count
-            obs_slice[tensor_insert_start : insert_end] = raw_disk_frames[:real_data_count]
-            
-            # =================================================================
-            # CASE C: End-of-episode padding (missing future)
-            # Condition: `insert_end < self.n_obs_steps`
-            # Meaning: Even after inserting all available real data, obs_slice 
-            # still isn't full. The episode abruptly ended.
-            # Action: Duplicate the very last available frame forwards in time.
-            # =================================================================
+
+        # --- Start-of-episode padding: fill the leading `pad_before` slots (no history exists)
+        # with the first real frame (edge replication backwards in time). ---
+        if pad_before > 0:
+            pad_count = min(pad_before, self.n_obs_steps)
+            obs_slice[:pad_count] = real_frames[0]
+
+        # Real frames: drop them into their chronological slots, right after the start padding. 
+        if pad_before < self.n_obs_steps:
+            num_real = min(self.n_obs_steps - pad_before, num_frames_to_read)
+            insert_end = pad_before + num_real
+            obs_slice[pad_before : insert_end] = real_frames[:num_real]
+
+            # End-of-episode padding: if the episode ended before filling all
+            # `n_obs_steps` slots, repeat the last real frame forwards in time.
             if insert_end < self.n_obs_steps:
-                obs_slice[insert_end:] = raw_disk_frames[-1]
-                
+                obs_slice[insert_end:] = real_frames[-1]
+
         t_end = time.time()
         if self.verbose:
             pid = os.getpid()
             print(
                 f"    [Worker {pid}] _get_synced_obs_slice ({name}):\n"
                 f"      - Index extraction: {(t_before_read - t_start) * 1000:.3f} ms\n"
-                f"      - Zarr Disk Read:   {(t_after_read - t_before_read) * 1000:.3f} ms\n"
+                f"      - Array Read:       {(t_after_read - t_before_read) * 1000:.3f} ms\n"
                 f"      - Copy & Padding:   {(t_end - t_after_read) * 1000:.3f} ms\n"
                 f"      - Total:            {(t_end - t_start) * 1000:.3f} ms"
             )
         return obs_slice
 
-    def _sample_to_data(self, sample, min_opacity=None):
-        """ 
+    def _opacity_filter_indices(self, gsplats_torch, min_opacity):
+        """
+        NORMALIZATION selection: keep all Gaussians with opacity >= min_opacity across the whole
+        observation window (min over the T_obs axis), active or not, with NO downsampling.
+
+        The policy never sees Gaussians pruned below min_opacity, so computing normalization stats
+        over exactly this set yields more accurate stats.
+
+        Args:
+            gsplats_torch: (T_obs, N, D) float tensor (raw channels, not yet transformed).
+            min_opacity:   opacity threshold.
+        Returns:
+            idx: (M,) long tensor of Gaussians with opacity >= min_opacity (variable M),
+                 or None if this dataset has no opacity channel to filter on.
+        """
+        if 'opacities' not in self.param_slices:
+            return None
+        opacities = gsplats_torch[..., self.param_slices['opacities']].amin(dim=0).squeeze(-1)  # (N,)
+        keep_mask = opacities >= min_opacity
+        return torch.nonzero(keep_mask, as_tuple=False).squeeze(-1)
+
+    def _subsample_gaussian_indices(self, gsplats_torch, min_opacity, num_gaussians):
+        """
+        BATCH-LOADING selection: pick `num_gaussians` (K) valid Gaussians per sample, on
+        the CPU, so only K Gaussians are transformed and crossed to the GPU.
+
+        A Gaussian is valid if it is active and has opacity >= min_opacity across the WHOLE
+        observation window (min over the T_obs axis). Among the valid ones we draw K uniformly
+        without replacement via `topk` over random keys.
+
+        Args:
+            gsplats_torch: (T_obs, N, D) float tensor.
+            min_opacity:   opacity threshold.
+            num_gaussians: K, the number of Gaussians to keep.
+        Returns:
+            idx: (K,) long tensor of selected Gaussian indices, or None if this dataset has
+                 neither an opacity nor an active-mask channel to filter on.
+        """
+        valid_mask = None
+        if 'opacities' in self.param_slices:
+            opacities = gsplats_torch[..., self.param_slices['opacities']].amin(dim=0).squeeze(-1)
+            valid_mask = (opacities >= min_opacity)
+        if 'active_gaussians_mask' in self.param_slices:
+            active = gsplats_torch[..., self.param_slices['active_gaussians_mask']].amin(dim=0).squeeze(-1)
+            active_mask = (active > 0.5)
+            valid_mask = active_mask if valid_mask is None else (valid_mask & active_mask)
+
+        if valid_mask is None:
+            return None
+
+        # Gather valid Gaussians, draw K random keys over ONLY those (cheaper than over all N and
+        # avoids a full-length sentinel array), then map the local picks back to global indices.
+        valid_indices = torch.where(valid_mask)[0]
+        num_valid = valid_indices.shape[0]
+        assert num_valid >= num_gaussians, (
+            f"Not enough valid Gaussians to sample from: "
+            f"{num_valid} valid < {num_gaussians} requested (min_opacity={min_opacity})."
+        )
+        rand_keys = torch.rand(num_valid)
+        _, topk_local = torch.topk(rand_keys, num_gaussians, largest=False)
+        return valid_indices[topk_local]
+
+    def _sample_to_data(self, sample, gaussian_selection=None):
+        """
         Returns data as dict of torch tensors.
         Handles two representation modes:
           - abs_joint_pos: pass-through (joint positions as proprio and actions)
           - relative_ee_pose: SE(3) transform GS into anchor frame, relative proprio and actions
-        
-        TODO: Introduce min_opacity sampling for accurate normalization!
+
+        `gaussian_selection` chooses which Gaussians survive (applied BEFORE the SE(3) transform,
+        so only the survivors are transformed and later transferred to the GPU). All variants use
+        the dataset's own `self.min_opacity` / `self.num_gaussians`:
+          - "subsample"      (used by __getitem__): active AND opacity >= min_opacity, then
+                             randomly downsample to exactly self.num_gaussians. Also drops the
+                             filter-only channels (opacities, active_gaussians_mask) afterwards.
+          - "opacity_filter" (used by get_normalizer): keep ALL Gaussians with
+                             opacity >= min_opacity (active or not), no downsample.
+          - None             (default): keep every Gaussian (legacy behavior).
         """
-        gsplats = sample['gsplats']   # (n_obs_steps, N, D) numpy float16
+        assert gaussian_selection in (None, "subsample", "opacity_filter"), \
+            f"invalid gaussian_selection: {gaussian_selection}"
+
+        gsplats_torch = torch.from_numpy(sample['gsplats']).float()   # (n_obs_steps, N, D)
+
+        # subsampling is done at the beginning for consistency between both representations
+        # it especially benefits relative_ee_pose as subsequent transformations are only applied to self.num_gaussians (K)
+        if gaussian_selection == "subsample":
+            keep_idx = self._subsample_gaussian_indices(
+                gsplats_torch, self.min_opacity, self.num_gaussians)
+        elif gaussian_selection == "opacity_filter":
+            keep_idx = self._opacity_filter_indices(gsplats_torch, self.min_opacity)
+        else:
+            keep_idx = None
+        if keep_idx is not None:
+            gsplats_torch = gsplats_torch[:, keep_idx, :]              # (n_obs_steps, K, D)
+
+        # When subsampling, opacities/active_gaussians_mask were consumed by the filter and are
+        # not read by the model, so drop them from the produced obs.
+        drop_gs_params = {'opacities', 'active_gaussians_mask'} if gaussian_selection == "subsample" else set()
 
         if self.representation_space == "abs_joint_pos":
             # =====================================================
@@ -809,16 +904,17 @@ class WristCamGSManiskillDataset(BaseDataset):
             # =====================================================
             agent_proprio = torch.from_numpy(sample['joint_pos_proprio'])
             action = torch.from_numpy(sample['joint_pos_action'])
-            
+
             obs_dict = {'agent_proprio': agent_proprio}
-            
+
             # Dynamically populate obs_dict based on gs_params layout
-            gsplats_torch = torch.from_numpy(gsplats)
             for p, size in zip(self.gs_params, self.gs_param_sizes):
+                if p in drop_gs_params:
+                    continue
                 obs_key = self.param_to_obs_key.get(p, f"gs_{p}")
                 s = self.param_slices[p]
                 obs_dict[obs_key] = gsplats_torch[..., s]
-                
+
             if 'positions' in self.gs_params:
                 obs_dict['point_cloud'] = obs_dict[self.param_to_obs_key['positions']]
 
@@ -833,7 +929,6 @@ class WristCamGSManiskillDataset(BaseDataset):
             tcp_pose_proprio = sample['tcp_pose_proprio'].astype(np.float32)   # (n_obs_steps, 7)
             tcp_pose_action = sample['tcp_pose_action'].astype(np.float32)     # (horizon, 8) = 7D pose + 1D gripper
             joint_pos_proprio = sample['joint_pos_proprio'].astype(np.float32)  # (n_obs_steps, 9)
-            gsplats = gsplats.astype(np.float32)                                # (n_obs_steps, N, D)
 
             # --- Anchor frame: TCP at the last observation step ---
             T_anchor_tcp_to_base = pose7_to_mat_np(tcp_pose_proprio[-1])      # (4, 4)
@@ -841,43 +936,35 @@ class WristCamGSManiskillDataset(BaseDataset):
             R_anchor_base_to_tcp = T_anchor_base_to_tcp[:3, :3]                # (3, 3)
             t_anchor_base_to_tcp = T_anchor_base_to_tcp[:3, 3]                 # (3,)
 
-            # --- Transform GS observations into the anchor frame ---
-            # GS at each obs step i is in robot base frame (from data collection).
-            # To express GS(i) in the anchor frame: T_anchor_base_to_tcp @ GS(i)
-            
-            # Transform positions: p_anchor = R_anchor_base_to_tcp @ p_base(i) + t_anchor_base_to_tcp
-            if 'positions' in self.param_slices:
-                s = self.param_slices['positions']
-                pos = gsplats[:, :, s]                            # (T_obs, N, 3)
-                # Vectorized: (T_obs, N, 3) @ (3, 3) + (3,)
-                gsplats[:, :, s] = (pos @ R_anchor_base_to_tcp.T) + t_anchor_base_to_tcp
+            # --- Transform the (already selected) GS observations into the anchor frame ---
+            R_anchor_base_to_tcp_torch = torch.from_numpy(R_anchor_base_to_tcp)   # (3, 3)
+            t_anchor_base_to_tcp_torch = torch.from_numpy(t_anchor_base_to_tcp)   # (3,)
 
-            # Transform 9D rotations: R_anchor = R_anchor_base_to_tcp @ R_base(i)
-            if 'rotations_9d' in self.param_slices:
-                # TODO: Better provide 6D rotations - then also change in env wrapper!
-                s = self.param_slices['rotations_9d']
-                rot9d = gsplats[:, :, s]                          # (T_obs, N, 9)
-                T_obs, N = rot9d.shape[:2]
-                rot_mats = rot9d.reshape(T_obs, N, 3, 3)         # (T_obs, N, 3, 3)
-                # (3, 3) @ (T_obs, N, 3, 3)
-                rot_mats = R_anchor_base_to_tcp @ rot_mats
-                gsplats[:, :, s] = rot_mats.reshape(T_obs, N, 9)
-
-            # Transform surface normals: n_anchor = R_anchor_base_to_tcp @ n_base(i)
-            if 'surf_normals' in self.param_slices:
-                s = self.param_slices['surf_normals']
-                normals = gsplats[:, :, s]                        # (T_obs, N, 3)
-                gsplats[:, :, s] = normals @ R_anchor_base_to_tcp.T
-
-            # Populate obs_dict from transformed gsplats
-            gsplats_torch = torch.from_numpy(gsplats)
             obs_dict = {}
             for p, size in zip(self.gs_params, self.gs_param_sizes):
+                if p in drop_gs_params:
+                    continue
                 obs_key = self.param_to_obs_key.get(p, f"gs_{p}")
                 s = self.param_slices[p]
-                obs_dict[obs_key] = gsplats_torch[..., s]
+                group = gsplats_torch[..., s]                                 # strided view into gsplats_torch
+
+                if p == 'positions':
+                    # (T_obs, K, 3) @ (3, 3) + (3,)
+                    obs_dict[obs_key] = group @ R_anchor_base_to_tcp_torch.T + t_anchor_base_to_tcp_torch
+                elif p == 'rotations_9d':
+                    T_obs, K = group.shape[:2]
+                    rot_mats = group.reshape(T_obs, K, 3, 3)                  # (T_obs, K, 3, 3)
+                    rot_mats = R_anchor_base_to_tcp_torch @ rot_mats
+                    obs_dict[obs_key] = rot_mats.reshape(T_obs, K, 9)
+                elif p == 'surf_normals':
+                    obs_dict[obs_key] = group @ R_anchor_base_to_tcp_torch.T
+                else:
+                    # Untouched channels (semantics, log_scales, rgbs, ...): materialize a
+                    # contiguous tensor so downstream gather / pin_memory / device-transfer is clean
+                    obs_dict[obs_key] = group.contiguous()
 
             if 'positions' in self.gs_params:
+                # point_cloud is consumed by the baseline (non-gsplat) DP3 policy
                 obs_dict['point_cloud'] = obs_dict[self.param_to_obs_key['positions']]
 
             # --- Proprioception: relative EE pose + gripper ---
@@ -940,7 +1027,7 @@ class WristCamGSManiskillDataset(BaseDataset):
         sample['gsplats'] = self._get_synced_obs_slice(raw_indices, self.gsplats_arrays[buf_idx], name="gsplats")
         t_6 = time.time()
 
-        data = self._sample_to_data(sample)
+        data = self._sample_to_data(sample, gaussian_selection="subsample")
         t_7 = time.time()
 
         if self.verbose:

@@ -59,6 +59,7 @@ dataset:
   zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack
   representation_space: ${task.representation_space}
   min_opacity: ${task.min_opacity}
+  num_gaussians: ${task.num_gaussians}
 
 train_data_augmentations:
   - _target_: diffusion_policy_3d.dataset.data_augmentations.HighOpacityActiveGaussianRandomSampling

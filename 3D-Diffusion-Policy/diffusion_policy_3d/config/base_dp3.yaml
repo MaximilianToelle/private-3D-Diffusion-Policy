@@ -63,20 +63,20 @@ ema:
 
 dataloader:
   batch_size: 128
-  num_workers: 0
+  num_workers: 8
   shuffle: True
   pin_memory: True
-  persistent_workers: False
-  prefetch_factor: null
+  persistent_workers: True
+  prefetch_factor: 4
   drop_last: True
 
 val_dataloader:
   batch_size: 128
-  num_workers: 0
+  num_workers: 8
   shuffle: False
   pin_memory: True
-  persistent_workers: False
-  prefetch_factor: null
+  persistent_workers: True
+  prefetch_factor: 4
 
 optimizer:
   _target_: torch.optim.AdamW
