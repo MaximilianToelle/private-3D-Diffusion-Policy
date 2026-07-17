@@ -60,7 +60,7 @@ dynagslam:
   global_keyframe_num: 3
 
   # map params
-  memory_length: 1
+  memory_length: 2
   uniform_sample_num: 50000
   add_transmission_thres: 0.2
   transmission_sample_ratio: 1.0
@@ -88,7 +88,7 @@ dynagslam:
   global_opt_top_ratio: 0.4
 
   # optimize params:
-  gaussian_update_iter: 100
+  gaussian_update_iter: 50
   gaussian_update_frame: 5
   final_global_iter: 10
   color_weight: 0.8

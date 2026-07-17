@@ -440,7 +440,7 @@ class DynaGSLAMWrapper(gym.Env):
         rgb_hw3 = raw_obs['sensor_data'][self.cam_name]['rgb'][0]   # (H, W, 3) uint8
         self._last_rgb = rgb_hw3.cpu().numpy()
 
-        obs_dict = {**gsplat_data, 'agent_pos': agent_pos}
+        obs_dict = {**gsplat_data, 'agent_proprio': agent_pos}
 
         if self.use_gsplat_viewer:
             self._update_gsplat_viewer(gsplat_data)
@@ -452,9 +452,9 @@ class DynaGSLAMWrapper(gym.Env):
     # ------------------------------------------------------------------
 
     def _build_observation_space(self, agent_pos_dim: int):
-        self.obs_sensor_dim = agent_pos_dim
+        self.obs_sensor_dim = agent_pos_dim # agent_proprio
         self.observation_space = spaces.Dict({
-            'agent_pos': spaces.Box(
+            'agent_proprio': spaces.Box(
                 low=-float('inf'), high=float('inf'),
                 shape=(agent_pos_dim,), dtype='float32',
             ),
@@ -501,7 +501,7 @@ class DynaGSLAMWrapper(gym.Env):
 
         # Build observation space on first call (agent_pos dim is now known)
         if self.observation_space is None:
-            self._build_observation_space(obs_dict['agent_pos'].shape[0])
+            self._build_observation_space(obs_dict['agent_proprio'].shape[0])
 
         # Return only obs (legacy Gym style) — MultiStepWrapper expects this
         return obs_dict

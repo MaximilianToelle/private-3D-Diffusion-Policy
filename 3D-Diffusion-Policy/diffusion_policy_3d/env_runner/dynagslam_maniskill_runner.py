@@ -137,7 +137,7 @@ class DynaGSLAMManiSkillRunner(BaseRunner):
                     init_state['actor_poses'] = {
                         k: replay_buffer[k][start_idx] for k in dataset.actor_keys
                     }
-                init_state['agent_pos'] = replay_buffer['state'][start_idx]
+                init_state['agent_proprio'] = replay_buffer['state'][start_idx]
 
             obs = env.reset(options={'init_state': init_state} if init_state is not None else None)
             policy.reset()
