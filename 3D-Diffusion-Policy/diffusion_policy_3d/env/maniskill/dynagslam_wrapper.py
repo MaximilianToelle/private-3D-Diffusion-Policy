@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import copy
 from typing import Optional
+from mani_skill.utils.structs.link import Link
 
 # DynaGSLAM internals
 from dynagslam.scene.cameras import Camera
@@ -113,6 +114,8 @@ class DynaGSLAMWrapper(gym.Env):
         # agent_pos dimensionality from qpos.
         self.obs_sensor_dim: Optional[int] = None
         self.observation_space: Optional[spaces.Dict] = None
+        agent_pos_dim = self.env.observation_space['agent']['qpos'].shape[-1]
+        self._build_observation_space(agent_pos_dim)
 
         if use_gsplat_viewer:
             self._init_gsplat_viewer()
@@ -174,9 +177,20 @@ class DynaGSLAMWrapper(gym.Env):
         depth_m = cam_data['depth'][0].float()               # (H, W, 1) or (H, W)
         if depth_m.ndim == 3:
             depth_m = depth_m[..., 0]                        # (H, W)
+        # ManiSkill depth is in millimetres; DynaGSLAM expects metres.
+        depth_m = depth_m / 1000.0
         depth_chw = (depth_m / 255.0).unsqueeze(0)           # (1, H, W)
 
         timestamp = frame_id / 20.0    # control_freq = 20 Hz → seconds
+
+        valid_depth = depth_m[torch.isfinite(depth_m) & (depth_m > 0)]
+        print(
+            "raw depth:",
+            depth_m.dtype,
+            tuple(depth_m.shape),
+            valid_depth.min().item() if valid_depth.numel() else None,
+            valid_depth.max().item() if valid_depth.numel() else None,
+)
 
         cam = Camera(
             colmap_id=frame_id,
@@ -218,10 +232,11 @@ class DynaGSLAMWrapper(gym.Env):
         ##seg_2d = seg[0, :, :, 0].cpu().numpy()                  # (H, W)
         ##dynamic_mask = (seg_2d > 0).astype(np.uint8)
         ##return dynamic_mask
+        ##print(f"movable_ids: {movable_ids}, unique seg IDs in frame: {np.unique(seg_2d)}")
         seg = obs['sensor_data'][self.cam_name]['segmentation']       # (B, H, W, 1)
         seg_2d = seg[0, :, :, 0].cpu().numpy()                          # (H, W)
 
-        id_map = env.unwrapped.segmentation_id_map
+        id_map = self.env.unwrapped.segmentation_id_map
         movable_ids = {
         obj_id for obj_id, obj in id_map.items()
         if isinstance(obj, Link) or getattr(obj, "px_body_type", None) == "dynamic"
@@ -255,12 +270,29 @@ class DynaGSLAMWrapper(gym.Env):
         # and computes world-space vertex / normal maps — no ICP / ORB needed.
         self._tracker_preprocessor.tracking(frame, frame_map, seg_mask, None)
 
+        # tracking() populates the world-space geometry entries.
+        d = frame_map["depth_map"]
+        v = frame_map["vertex_map_w"]
+
         # Pass world-space vertex map back into frame_map so Mapping can use it
         # (tracking() populates frame_map["vertex_map_w"] and "normal_map_w").
 
         # Run Gaussian map update (add points, local optimise, prune)
         # flow_gt=None → DynaGSLAM falls back to pose-only dynamic association
         # timestamp_curr / timestamp_old based on frame_id counter
+
+        print(
+            "processed depth:",
+            d.min().item(),
+            d.max().item(),
+            "nonzero:", (d > 0).sum().item(),
+            "/", d.numel(),
+        )
+        print(
+            "vertex finite:", torch.isfinite(v).all().item(),
+            "nonzero vertices:", (v.abs().sum(dim=-1) > 0).sum().item(),
+        )
+
         t_curr = frame.timestamp
         t_old  = (self._frame_id - 1) / 20.0 if self._frame_id > 0 else 0.0
 
@@ -290,10 +322,10 @@ class DynaGSLAMWrapper(gym.Env):
         Read self.gaussian_map.global_params and reformat into policy obs keys.
 
         global_params keys (from Mapping):
-            xyz:       (N, 3)    positions
-            opacity:   (N, 1)    pre-sigmoid logit opacities
-            scales:    (N, 3)    log-scales (already in log space)
-            rotations: (N, 4)    quaternions wxyz (checked from GaussianPointCloud)
+            xyz:       (N, L, 3) positions; renderer uses level 0
+            opacity:   (N, 1)    activated opacities
+            scales:    (N, 3)    activated positive scales
+            rotations: (N, L, 4) wxyz quaternions; renderer uses level 0
             shs:       (N, ?, 3) spherical harmonics; index [0] = DC band
 
         Returns dict with policy-facing keys.
@@ -312,18 +344,26 @@ class DynaGSLAMWrapper(gym.Env):
                 'gs_rgb':          torch.zeros(1, 3, device=device),
             }
 
-        xyz       = gp['xyz']           # (N, 3)
-        log_scales = gp['scales']       # (N, 3) — already log-scaled by GS convention
-        quats      = gp['rotations']    # (N, 4) wxyz quaternions
-        logit_opacity = gp['opacity']   # (N, 1)
-        shs        = gp['shs']          # (N, K, 3)
+        # DynaGSLAM stores L geometry levels for xyz/rotation. Its renderer uses
+        # level 0, so expose that same component to the policy.
+        xyz = gp['xyz'][:, 0, :] if gp['xyz'].ndim == 3 else gp['xyz']
+        quats = (
+            gp['rotations'][:, 0, :]
+            if gp['rotations'].ndim == 3
+            else gp['rotations']
+        )
+
+        # Mapping.global_params returns activated values. Convert scales back to
+        # the log representation expected by the policy, but do not sigmoid the
+        # already-activated opacity a second time.
+        log_scales = torch.log(gp['scales'].clamp_min(1e-12))
+        opacities = gp['opacity'].clamp(0.0, 1.0)
+        shs = gp['shs']
 
         # Quaternion (wxyz) → 3×3 rotation matrix → flatten to 9-D
         quats_norm = torch.nn.functional.normalize(quats, dim=-1)
         rot_mats   = _quaternion_wxyz_to_matrix(quats_norm)   # (N, 3, 3)
         rot_9d     = rot_mats.reshape(N, 9)
-
-        opacities = torch.sigmoid(logit_opacity)   # (N, 1)  in [0, 1]
 
         # DC SH band → linear RGB approximation
         dc = shs[:, 0, :]                          # (N, 3)

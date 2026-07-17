@@ -58,9 +58,10 @@ class DynaGSLAMManiSkillRunner(BaseRunner):
         slam_args.use_gt_pose = True
         slam_args.mode = "single process"
 
-        parser = ArgumentParser()
-        _map_params = MapParams(parser)
-        optimization_params = OptimizationParams(parser)
+        #parser = ArgumentParser()
+        #_map_params = MapParams(parser)
+        #optimization_params = OptimizationParams(parser)
+        optimization_params = dynagslam_config
         #optimization_params = optimizatioTypeError('expected str, bytes or os.PathLike object, not DictConfig')
 
         # -------------------------------------------------------------------------
@@ -159,7 +160,7 @@ class DynaGSLAMManiSkillRunner(BaseRunner):
                         'gs_log_scales':   obs_dict['gs_log_scales'].unsqueeze(0),
                         'gs_opacities':    obs_dict['gs_opacities'].unsqueeze(0),
                         'gs_rgb':          obs_dict['gs_rgb'].unsqueeze(0),
-                        'agent_pos':       obs_dict['agent_pos'].unsqueeze(0),
+                        'agent_proprio':       obs_dict['agent_proprio'].unsqueeze(0),    # agent_pos rathen than agent_proprio
                     }
                     action_dict = policy.predict_action(obs_dict_input)
 
