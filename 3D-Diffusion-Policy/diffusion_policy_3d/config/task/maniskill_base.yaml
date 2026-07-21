@@ -14,12 +14,15 @@ shape_meta: &shape_meta
 
 env_runner:
   eval_episodes: 20
-  max_steps: 400
-  n_obs_steps: ${n_obs_steps}
-  n_action_steps: ${n_action_steps}
-  fps: 10
-  n_envs: 1
   task_name: StackFr3Env-v1
+  robot_uids: fr3_umi_wrist435_modified
+  obs_mode: rgb+depth+segmentation
+  n_envs: 1
+  max_steps: 400
+  sim_freq: 100
+  control_freq: 20
+  tqdm_interval_sec: 5.0
+  device: cuda:0
 
 dataset:
   horizon: ${horizon}

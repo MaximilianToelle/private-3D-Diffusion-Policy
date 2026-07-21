@@ -7,7 +7,7 @@ from diffusion_policy_3d.common.transform_utils import pose9d_to_mat_torch, mat_
 
 class RelativeEEControlWrapper(gym.Wrapper):
     """
-    Transforms the stacked history into relative EE space based on the latest step's TCP pose (anchor).
+    Transforms the *stacked* history into relative EE space based on the latest step's TCP pose (anchor).
     Transforms policy's relative EE targets back into absolute EE targets for pd_ee_pose control.
     """
     def __init__(self, env):
@@ -36,6 +36,14 @@ class RelativeEEControlWrapper(gym.Wrapper):
         Takes the raw obs dictionary (with stacked n_obs_steps sequences) and transforms
         proprioception and Gaussians into the anchor frame (the TCP pose of the current timestep).
         """
+        # Point-cloud obs is not yet supported: only gs_* keys are transformed below, so a
+        # 'point_cloud' key would silently stay in the base frame while proprio moves to the anchor.
+        if 'point_cloud' in obs and 'gs_positions' not in obs:
+            raise NotImplementedError(
+                "RelativeEEControlWrapper does not support the point-cloud representation "
+                "('point_cloud' present without 'gs_positions'): only gs_* keys are transformed."
+            )
+
         tcp_pose_obs = obs['agent_proprio'][..., :-2]   # (n_obs_steps, 7), position + quaternion
         
         # Anchor frame: TCP at the last observation step
