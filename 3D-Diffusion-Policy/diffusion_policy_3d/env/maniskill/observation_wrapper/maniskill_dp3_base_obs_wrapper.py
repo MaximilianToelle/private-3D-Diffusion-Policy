@@ -7,12 +7,12 @@ only what is specific to its modality:
 
   * `_perception_observation_space()` -> the modality's obs-space entries (gs_* / point_cloud
     / voxels ...). The base already contributes `agent_proprio`.
-  * `_get_obs_dict(obs, step)` -> the produced observation dict (must include 'agent_proprio').
+  * `_get_perception_obs_dict(obs, step)` -> ONLY the modality's produced keys. The base
+    prepends `agent_proprio`, so subclasses never touch proprioception.
   * `_reset_perception_state()` -> clear any per-episode buffers (optional).
 
-Proprioception (`agent_proprio`) is representation-dependent and shared, so it lives here.
-Its declared dimension is taken from `representation_space` using the same mapping the
-config's `shape_meta` uses -- NOT probed from an `env.reset()`.
+Proprioception (`agent_proprio`) is representation-dependent and shared, so both its obs-space
+entry and its produced value are owned here -- subclasses only care about perception.
 """
 
 import gym
@@ -20,20 +20,15 @@ from gym import spaces
 import torch
 
 
-STATIC_ACTORS = {"table-workspace", "ground"}
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# TODO: read this dim from the config shape_meta instead of duplicating the mapping here.
-_AGENT_PROPRIO_DIM = {"relative_ee_pose": 11, "abs_joint_pos": 9}
-
-
 class ManiSkillDP3BaseObsWrapper(gym.Env):
-    def __init__(self, env, representation_space):
+    def __init__(self, env, representation_space, agent_proprio_dim, render_cam_name):
         super().__init__()
         self.env = env
-        assert representation_space in _AGENT_PROPRIO_DIM, \
-            f"representation_space must be one of {tuple(_AGENT_PROPRIO_DIM)}, got '{representation_space}'"
+        self.device = self.env.unwrapped.device
         self.representation_space = representation_space
+        self.agent_proprio_dim = agent_proprio_dim
+        self.render_cam_name = render_cam_name
+        self._last_rgb = None
 
         # Action space: cast the underlying Gymnasium Box to a legacy Gym Box for DP3's wrapper math.
         orig_as = self.env.action_space
@@ -44,9 +39,6 @@ class ManiSkillDP3BaseObsWrapper(gym.Env):
             dtype=orig_as.dtype,
         )
 
-        # Observation space: agent_proprio (dim from representation_space) + the subclass's
-        # perception keys. No env.reset() probe -- the proprio dim comes from the mapping.
-        self.agent_proprio_dim = _AGENT_PROPRIO_DIM[representation_space]
         obs_space = {
             'agent_proprio': spaces.Box(
                 low=-float('inf'), high=float('inf'),
@@ -64,8 +56,9 @@ class ManiSkillDP3BaseObsWrapper(gym.Env):
         """Return the modality-specific obs-space entries (WITHOUT agent_proprio)."""
         raise NotImplementedError
 
-    def _get_obs_dict(self, obs, step) -> dict:
-        """Build the produced observation dict. MUST include 'agent_proprio'."""
+    def _get_perception_obs_dict(self, obs, step) -> dict:
+        """Return ONLY the modality's produced keys (gs_* / point_cloud / ...). The base
+        prepends 'agent_proprio' in `_get_obs_dict`, so subclasses never build it."""
         raise NotImplementedError
 
     def _reset_perception_state(self):
@@ -76,6 +69,26 @@ class ManiSkillDP3BaseObsWrapper(gym.Env):
     # ------------------------------------------------------------------ #
     # Shared concrete behavior.
     # ------------------------------------------------------------------ #
+    def _get_obs_dict(self, obs, step) -> dict:
+        """
+        Assemble the full observation: 'agent_proprio' (owned here) + the subclass's perception keys.
+        Also caches the last RGB frame for `render()` (shared plumbing).
+        """
+        self._cache_render_frame(obs)
+        obs_dict = {'agent_proprio': self._extract_agent_proprio(obs)}
+        obs_dict.update(self._get_perception_obs_dict(obs, step))
+        return obs_dict
+
+    def _cache_render_frame(self, obs):
+        """
+        Cache the last RGB frame used by `render()`. The source camera differs per
+        wrapper, so each subclass passes `render_cam_name` to the base constructor.
+        """
+        rgb = obs['sensor_data'][self.render_cam_name]['rgb']
+        if rgb.ndim == 4:   # unify batched (1, H, W, 3) across wrappers
+            rgb = rgb[0]
+        self._last_rgb = rgb.clone().to(torch.uint8)
+
     def _extract_agent_proprio(self, obs):
         # We assume the env returns unbatched shapes or batched arrays of size (1, ...)
         if self.representation_space == "abs_joint_pos":
@@ -90,6 +103,8 @@ class ManiSkillDP3BaseObsWrapper(gym.Env):
                 tcp_pose = tcp_pose[0]
                 gripper_state = gripper_state[0]
             agent_proprio = torch.cat([tcp_pose, gripper_state]).float()
+        else:
+            raise ValueError(f"Unhandled representation_space '{self.representation_space}'")
         return agent_proprio
 
     def step(self, action):
@@ -126,6 +141,6 @@ class ManiSkillDP3BaseObsWrapper(gym.Env):
         return self._get_obs_dict(obs, info['elapsed_steps'].item())
 
     def render(self, mode="rgb_array"):
-        if hasattr(self, '_last_rgb'):
+        if self._last_rgb is not None: 
             return self._last_rgb.cpu().numpy()
         return torch.zeros((256, 256, 3), dtype=torch.uint8).numpy()

@@ -50,6 +50,7 @@ env_runner:
   _target_: diffusion_policy_3d.env_runner.maniskill_runner.ManiSkillRunner
   task_name: StackFr3WristCamSimpleEnv-v1
   representation_space: ${task.representation_space}
+  agent_proprio_dim: ${task.shape_meta.obs.agent_proprio.shape[0]}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
 
@@ -63,6 +64,7 @@ env_runner:
     _target_: diffusion_policy_3d.env_runner.maniskill_env_obs_wrapper_builder.wrist_cam_online_gaussian_splatting
     _partial_: true
     representation_space: ${task.representation_space}
+    agent_proprio_dim: ${task.shape_meta.obs.agent_proprio.shape[0]}
     n_obs_steps: ${n_obs_steps}
     n_action_steps: ${n_action_steps}
     scene_gs_cfg_name: fr3_stack_with_normals

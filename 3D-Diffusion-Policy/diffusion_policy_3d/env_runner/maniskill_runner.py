@@ -32,6 +32,12 @@ from diffusion_policy_3d.gym_util.video_recording_wrapper import SimpleVideoReco
 from termcolor import cprint
 
 
+# Canonical set of representations the pipeline supports. The runner is the
+# single entry point where `representation_space` fans out (control_mode, the RelativeEE
+# wrapper, and the obs-wrapper builder), so it validates the value once, up front.
+REPRESENTATION_SPACES = ("relative_ee_pose", "abs_joint_pos")
+
+
 def _extract_success(info) -> bool:
     """SAPIEN returns a metrics dict; turn its `success` field to a python bool."""
     if isinstance(info, dict) and 'success' in info:
@@ -57,6 +63,7 @@ class ManiSkillRunner(BaseRunner):
         robot_uids: str = "fr3_umi_wrist435_modified",
         obs_mode: str = "rgb+depth+segmentation",
         representation_space: str = "relative_ee_pose",
+        agent_proprio_dim: int = 11,
         n_obs_steps: int = 2,
         n_action_steps: int = 8,
         n_envs: int = 1,
@@ -66,10 +73,17 @@ class ManiSkillRunner(BaseRunner):
         device: str = "cuda:0",
     ):
         super().__init__(output_dir)
+        
+        assert representation_space in REPRESENTATION_SPACES, \
+            f"representation_space must be one of {REPRESENTATION_SPACES}, got '{representation_space}'"
+        
         self.task_name = task_name
-        self.device = device
+        self.representation_space = representation_space
+        self.agent_proprio_dim = agent_proprio_dim      # policy-facing proprio dim from the config shape_meta
+        self._obs_shape_validated = False
         self.eval_episodes = eval_episodes
         self.tqdm_interval_sec = tqdm_interval_sec
+        self.device = device
         
         self.callbacks: List[EvalCallback] = list(callbacks) if callbacks is not None else []
         self.obs_key_aliases: Dict[str, str] = dict(obs_key_aliases) if obs_key_aliases is not None else {}
@@ -81,15 +95,15 @@ class ManiSkillRunner(BaseRunner):
             control_mode="pd_ee_pos_quat" if representation_space == "relative_ee_pose" else "pd_joint_pos",
             num_envs=n_envs,
             max_episode_steps=max_steps,
-            sim_backend="gpu",
-            sim_config=dict(sim_freq=sim_freq, control_freq=control_freq),   
+            sim_backend="gpu" if "cuda" in device else "cpu",
+            sim_config=dict(sim_freq=sim_freq, control_freq=control_freq),
         )
 
         # `maniskill_env_obs_wrapper_builder` is a functools.partial from hydra with
         # perception-specific params defined in the config
         env = maniskill_env_obs_wrapper_builder(
             base_env=base_env,
-            device=device,
+            device=self.device,
         )
 
         env = AttentionOverlayWrapper(env)     # recolors the scene which gets captured in the recorded frames 
@@ -106,7 +120,7 @@ class ManiSkillRunner(BaseRunner):
         self.env = env
 
     def run(self, policy: BasePolicy, dataset=None, prefix: str = ""):
-        device = policy.device
+        policy_device = policy.device   # obs tensors must match the policy's weights, not the sim device
         env = self.env
 
         all_traj_rewards: List[float] = []
@@ -131,6 +145,8 @@ class ManiSkillRunner(BaseRunner):
                 init_state, expert_trajectory = dataset.get_episode_init_data(random_episode_idx)
 
             obs = env.reset(options={'init_state': init_state} if init_state is not None else None)
+            if not self._obs_shape_validated:
+                self._validate_obs_shape(obs)
             policy.reset()
 
             for cb in self.callbacks:
@@ -144,11 +160,11 @@ class ManiSkillRunner(BaseRunner):
 
             while not done:
                 obs_dict = dict_apply(dict(obs),
-                                      lambda x: x.to(device=device) if isinstance(x, torch.Tensor)
-                                      else torch.from_numpy(x).to(device=device))
+                                      lambda x: x.to(device=policy_device) if isinstance(x, torch.Tensor)
+                                      else torch.from_numpy(x).to(device=policy_device))
 
                 with torch.no_grad():
-                    # Forward every obs key (encoders select what they need); add batch dim.
+                    # Forward every obs key (encoders select what they need); add batch dim and alias keys
                     obs_dict_input = {k: v.unsqueeze(0) for k, v in obs_dict.items()}
                     for alias, src in self.obs_key_aliases.items():
                         obs_dict_input[alias] = obs_dict[src].unsqueeze(0)
@@ -226,6 +242,19 @@ class ManiSkillRunner(BaseRunner):
 
         return log_data
 
+    def _validate_obs_shape(self, obs):
+        """
+        Fail fast if the FULL wrapper stack's proprio dim disagrees with the config
+        shape_meta. Runs once, on the first reset.
+        """
+        actual = obs['agent_proprio'].shape[-1]
+        assert actual == self.agent_proprio_dim, (
+            f"agent_proprio dim mismatch: config shape_meta declares {self.agent_proprio_dim} "
+            f"but the full env stack produced {actual} for "
+            f"representation_space='{self.representation_space}'."
+        )
+        self._obs_shape_validated = True
+
     def _safe_callback(self, cb: EvalCallback, method: str, **kwargs):
         try:
             getattr(cb, method)(self, **kwargs)
@@ -285,16 +314,14 @@ if __name__ == "__main__":
         config_name="wrist_cam_gsplat_dp3",
     )
     def main(cfg):
-        device = "cuda:0"
         output_dir = "test_eval_output"
         os.makedirs(output_dir, exist_ok=True)
 
         env_runner: BaseRunner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=output_dir)
-        if env_runner is not None:
-            assert isinstance(env_runner, BaseRunner)
+        assert isinstance(env_runner, BaseRunner)
 
-        action_dim = 8 if env_runner.env.unwrapped.representation_space == "abs_joint_pos" else 10
-        policy = DummyPolicy(action_dim=action_dim, action_steps=8, device=device)
+        action_dim = 8 if env_runner.representation_space == "abs_joint_pos" else 10
+        policy = DummyPolicy(action_dim=action_dim, action_steps=8, device=env_runner.device)
 
         runner_log_train = env_runner.run(policy)
         print("Log data:", runner_log_train)

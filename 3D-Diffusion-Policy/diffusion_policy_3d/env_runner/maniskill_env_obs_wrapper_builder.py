@@ -16,7 +16,7 @@ from gsworld.mani_skill.utils.wrappers import WristCamGSWorldWrapper
 from arguments import PipelineParams
 
 from diffusion_policy_3d.env.maniskill.observation_wrapper.gaussian_splatting.maniskill_wrist_cam_gs_wrapper import WristCamGSManiskillDP3Wrapper
-from diffusion_policy_3d.env.maniskill.observation_wrapper.pcd.maniskill_pcd_wrapper import ManiSkillDP3Wrapper
+from diffusion_policy_3d.env.maniskill.observation_wrapper.pcd.maniskill_pcd_wrapper import PCDManiSkillDP3Wrapper
 
 
 def wrist_cam_online_gaussian_splatting(
@@ -26,6 +26,7 @@ def wrist_cam_online_gaussian_splatting(
     device,
     # defined in config, injected by hydra
     representation_space,
+    agent_proprio_dim,
     n_obs_steps,
     n_action_steps,
     scene_gs_cfg_name,
@@ -50,6 +51,7 @@ def wrist_cam_online_gaussian_splatting(
     env = WristCamGSManiskillDP3Wrapper(
         env,
         representation_space,
+        agent_proprio_dim=agent_proprio_dim,
         num_gaussians=num_gaussians,
         min_opacity=min_opacity,
         n_action_steps=n_action_steps,
@@ -65,6 +67,7 @@ def wrist_cam_online_gaussian_splatting(
 #     device,
 #     # defined in config, injected by hydra
 #     representation_space,
+#     agent_proprio_dim,
 #     scene_gs_cfg_name,
 #     cam_name,
 #     num_points,
@@ -89,8 +92,10 @@ def wrist_cam_online_gaussian_splatting(
 #         scene_gs_cfg_name=scene_gs_cfg_name,
 #         device=device,
 #     )
-#     env = ManiSkillDP3Wrapper(
+#     env = PCDManiSkillDP3Wrapper(
 #         env,
+#         representation_space,
+#         agent_proprio_dim=agent_proprio_dim,
 #         cam_name=cam_name,
 #         num_points=num_points,
 #     )
