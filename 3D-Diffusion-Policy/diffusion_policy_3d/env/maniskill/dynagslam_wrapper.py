@@ -117,6 +117,8 @@ class DynaGSLAMWrapper(gym.Env):
         agent_pos_dim = self.env.observation_space['agent']['qpos'].shape[-1]
         self._build_observation_space(agent_pos_dim)
 
+        self._last_gs_rgb = None
+
         if use_gsplat_viewer:
             self._init_gsplat_viewer()
 
@@ -309,6 +311,26 @@ class DynaGSLAMWrapper(gym.Env):
             t_past=t_old,
         )
 
+        with torch.no_grad():
+            render_output = self.gaussian_map.renderer.render(
+                frame,
+                self.gaussian_map.global_params,
+            )
+
+            gs_rgb = render_output["render"]          # (3, H, W), float [0,1]
+            gs_rgb = (
+                gs_rgb
+                .clamp(0.0, 1.0)
+                .permute(1, 2, 0)
+                .mul(255)
+                .byte()
+                .cpu()
+                .numpy()
+            )
+
+            self._last_gs_rgb = gs_rgb
+
+
         self.gaussian_map.time += 1
         move_to_cpu(frame)
         self._frame_id += 1
@@ -427,8 +449,18 @@ class DynaGSLAMWrapper(gym.Env):
         """
         Compose the final policy-facing observation dict.
         """
-        gsplat_data = self._extract_gaussians_from_map()
-        gsplat_data = self._subsample_gaussians(gsplat_data, force_resample)
+        # Complete DynaGSLAM map.
+        full_gsplat_data = self._extract_gaussians_from_map()
+
+        # Show the complete reconstruction in Viser.
+        if self.use_gsplat_viewer:
+            self._update_gsplat_viewer(full_gsplat_data)
+
+        # Keep the policy input at num_gaussians, e.g. 1024.
+        gsplat_data = self._subsample_gaussians(
+            full_gsplat_data,
+            force_resample,
+        )
 
         # Agent state: robot joint positions
         qpos = raw_obs['agent']['qpos']
@@ -442,8 +474,6 @@ class DynaGSLAMWrapper(gym.Env):
 
         obs_dict = {**gsplat_data, 'agent_proprio': agent_pos}
 
-        if self.use_gsplat_viewer:
-            self._update_gsplat_viewer(gsplat_data)
 
         return obs_dict
 
@@ -535,11 +565,18 @@ class DynaGSLAMWrapper(gym.Env):
         return obs_dict, float(reward), done, info
 
     def render(self, mode="rgb_array"):
-        """Return the last RGB camera frame for video recording."""
-        if self._last_rgb is not None:
-            return self._last_rgb
-        return np.zeros((256, 256, 3), dtype=np.uint8)
+        if self._last_rgb is None:
+            return np.zeros((256, 512, 3), dtype=np.uint8)
 
+        if self._last_gs_rgb is None:
+            return self._last_rgb
+
+        # Left: ManiSkill ground truth
+        # Right: DynaGSLAM Gaussian reconstruction
+        return np.concatenate(
+            [self._last_rgb, self._last_gs_rgb],
+            axis=1,
+        )
     # ------------------------------------------------------------------
     # Optional: gsplat viewer
     # ------------------------------------------------------------------
@@ -573,19 +610,32 @@ class DynaGSLAMWrapper(gym.Env):
         server.on_client_connect(partial(_on_connect, server=server, scene_center=scene_center))
 
     def _update_gsplat_viewer(self, gsplat_data: dict):
-        """Push subsampled Gaussians into the viewer."""
+        """Atomically push a Gaussian-map snapshot into the viewer."""
         if not self.use_gsplat_viewer:
             return
-        self._gs4viewer['means'] = gsplat_data['gs_positions']
-        N = gsplat_data['gs_rotations_9d'].shape[0]
-        rot_mats = gsplat_data['gs_rotations_9d'].reshape(N, 3, 3)
-        self._gs4viewer['quats'] = _matrix_to_quaternion_wxyz(rot_mats)
-        self._gs4viewer['scales'] = gsplat_data['gs_log_scales']
-        self._gs4viewer['rgb_colors'] = gsplat_data['gs_rgb']
-        self._gs4viewer['opacities'] = torch.logit(
-            gsplat_data['gs_opacities'].view(-1).clamp(1e-6, 1 - 1e-6)
-        )
-        self._viewer.rerender(None)
+
+        # Build a complete snapshot first. Viser renders on another thread, so
+        # updating the fields one by one can mix tensors from consecutive map
+        # sizes (for example, new means with old quaternions).
+        with torch.no_grad():
+            N = gsplat_data['gs_rotations_9d'].shape[0]
+            rot_mats = gsplat_data['gs_rotations_9d'].reshape(N, 3, 3)
+            viewer_snapshot = {
+                'means': gsplat_data['gs_positions'].detach(),
+                'quats': _matrix_to_quaternion_wxyz(rot_mats).detach(),
+                'scales': gsplat_data['gs_log_scales'].detach(),
+                'rgb_colors': gsplat_data['gs_rgb'].detach(),
+                'opacities': torch.logit(
+                    gsplat_data['gs_opacities'].view(-1).clamp(1e-6, 1 - 1e-6)
+                ).detach(),
+            }
+
+        self._viewer.lock.acquire()
+        try:
+            self._gs4viewer = viewer_snapshot
+            self._viewer.rerender(None)
+        finally:
+            self._viewer.lock.release()
 
 
 # ---------------------------------------------------------------------------

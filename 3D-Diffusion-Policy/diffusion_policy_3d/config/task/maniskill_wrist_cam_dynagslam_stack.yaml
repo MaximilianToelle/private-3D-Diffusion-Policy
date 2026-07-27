@@ -8,7 +8,7 @@ env_runner:
   _target_: diffusion_policy_3d.env_runner.dynagslam_maniskill_runner.DynaGSLAMManiSkillRunner
   task_name: StackFr3WristCamSimpleEnv-v1
   num_gaussians: ${task.num_gaussians}
-  use_gsplat_viewer: false
+  use_gsplat_viewer: True
   cam_name: "wrist_cam"
   dynagslam_config: ${task.dynagslam}
   representation_space: ${task.representation_space}
@@ -53,7 +53,7 @@ dynagslam:
   L: 2
 
   # map preprocess
-  min_depth: 0.3
+  min_depth: 0.1
   max_depth: 5.0
   depth_filter: False
   invalid_confidence_thresh: 0.2
