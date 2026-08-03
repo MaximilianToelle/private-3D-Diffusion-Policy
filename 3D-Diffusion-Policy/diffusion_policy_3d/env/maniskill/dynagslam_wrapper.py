@@ -551,7 +551,7 @@ class DynaGSLAMWrapper(gym.Env):
         # Update the Gaussian map with the new observation
         self._run_slam_step(raw_obs)
 
-        obs_dict = self._build_obs_dict(raw_obs, force_resample=False)
+   ##   obs_dict = self._build_obs_dict(raw_obs, force_resample=False)
 
         # Flatten to scalars (legacy Gym style expected by MultiStepWrapper)
         if hasattr(terminated, 'item'):
@@ -562,6 +562,12 @@ class DynaGSLAMWrapper(gym.Env):
             reward = float(reward.item()) if reward.ndim == 0 else float(reward[0].item())
 
         done = bool(terminated or truncated)
+        if done:
+            #here ther is one global otimization step at the end of the episode , here only thr last keyframe is selected for optimization
+            final_optimization_params = copy.deepcopy(self.optimization_params)
+            self.gaussian_map.global_optimization(final_optimization_params,select_keyframe_num=1)
+
+        obs_dict = self._build_obs_dict(raw_obs, force_resample=False)
         return obs_dict, float(reward), done, info
 
     def render(self, mode="rgb_array"):

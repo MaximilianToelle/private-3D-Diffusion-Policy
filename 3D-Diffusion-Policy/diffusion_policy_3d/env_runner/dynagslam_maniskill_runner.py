@@ -1,13 +1,14 @@
 
 import torch
-from typing import Dict
-import torch.nn as nn
 import numpy as np
 import tqdm
 import os
 import imageio
 import gymnasium
 import gsworld      # for gym env registration
+from gsworld.mani_skill.examples.motionplanning.franka.motionplanner_policy import (
+    CanStackMotionPlanningPolicy,
+)
 
 # DynaGSLAM config / params
 from argparse import ArgumentParser
@@ -208,31 +209,6 @@ class DynaGSLAMManiSkillRunner(BaseRunner):
         return log_data
 
 
-class DummyPolicy(nn.Module):
-    def __init__(self, action_dim=7, action_steps=8, device="cuda:0"):
-        super().__init__()
-        self._device = torch.device(device)
-        self.action_dim = action_dim
-        self.action_steps = action_steps
-    
-    @property
-    def device(self):
-        return self._device
-        
-    def reset(self):
-        pass
-        
-    def eval(self):
-        pass
-        
-    def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        B = obs_dict['gs_positions'].shape[0]
-
-        # Return random dummy actions for sequence
-        action = torch.zeros((B, self.action_steps, self.action_dim), device=self.device)
-        return {'action': action}
-
-
 if __name__ == "__main__":
     import hydra
     import sys
@@ -263,10 +239,10 @@ if __name__ == "__main__":
         if env_runner is not None:
             assert isinstance(env_runner, BaseRunner)
 
-        policy = DummyPolicy(
-            action_dim=env_runner.env.action_space.shape[0],
-            action_steps=8,
-            device=device
+        policy = CanStackMotionPlanningPolicy(
+            env=env_runner.env.unwrapped.env,
+            action_steps=cfg.n_action_steps,
+            device=device,
         )
 
         runner_log_train = env_runner.run(policy)
