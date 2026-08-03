@@ -6,10 +6,7 @@ defaults:
 name: train_dp3
 
 policy:   # pcd-specific params
-  use_point_crop: true
-  crop_shape:
-  - 80
-  - 80
+  use_point_crop: true   # anchor for ${policy.use_point_crop} in the legacy metaworld/adroit/dexart task configs
   use_pc_color: false
   pointnet_type: "pointnet"
   pointcloud_encoder_cfg:

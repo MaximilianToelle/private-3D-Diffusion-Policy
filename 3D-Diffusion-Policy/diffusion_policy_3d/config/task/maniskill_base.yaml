@@ -13,8 +13,15 @@ shape_meta: &shape_meta
       - ${eval:'{"relative_ee_pose":10,"abs_joint_pos":8}["${task.representation_space}"]'}
 
 env_runner:
-  eval_episodes: 20
+  # Runner class + param wiring is identical for every maniskill task/obs-space, so it
+  # lives here. Scene/leaf configs override only task_name and the obs-wrapper builder and callbacks.
+  _target_: diffusion_policy_3d.env_runner.maniskill_runner.ManiSkillRunner
   task_name: StackFr3Env-v1
+  representation_space: ${task.representation_space}
+  agent_proprio_dim: ${task.shape_meta.obs.agent_proprio.shape[0]}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  eval_episodes: 20
   robot_uids: fr3_umi_wrist435_modified
   obs_mode: rgb+depth+segmentation
   n_envs: 1
@@ -32,3 +39,7 @@ dataset:
   seed: 42
   val_ratio: 0.1
   max_train_episodes: null  # null: use max number of train episodes while respecting val_ratio
+
+# Default: no GPU data augmentations. Leaves override when they need them.
+train_data_augmentations: []
+val_data_augmentations: []

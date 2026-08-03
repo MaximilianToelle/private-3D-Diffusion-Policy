@@ -35,7 +35,9 @@ from termcolor import cprint
 # Canonical set of representations the pipeline supports. The runner is the
 # single entry point where `representation_space` fans out (control_mode, the RelativeEE
 # wrapper, and the obs-wrapper builder), so it validates the value once, up front.
-REPRESENTATION_SPACES = ("relative_ee_pose", "abs_joint_pos")
+# "abs_ee_pose": absolute pd_ee_pos_quat targets straight from the policy (mindmap
+# baseline predicts absolute keyposes) -- no RelativeEEControlWrapper.
+REPRESENTATION_SPACES = ("relative_ee_pose", "abs_joint_pos", "abs_ee_pose")
 
 
 def _extract_success(info) -> bool:
@@ -92,7 +94,7 @@ class ManiSkillRunner(BaseRunner):
             task_name,
             robot_uids=robot_uids,
             obs_mode=obs_mode,
-            control_mode="pd_ee_pos_quat" if representation_space == "relative_ee_pose" else "pd_joint_pos",
+            control_mode="pd_ee_pos_quat" if representation_space in ("relative_ee_pose", "abs_ee_pose") else "pd_joint_pos",
             num_envs=n_envs,
             max_episode_steps=max_steps,
             sim_backend="gpu" if "cuda" in device else "cpu",
@@ -265,15 +267,10 @@ class ManiSkillRunner(BaseRunner):
 if __name__ == "__main__":
     import os
     import hydra
-    import sys
     import torch.nn as nn
     from omegaconf import OmegaConf
 
     OmegaConf.register_new_resolver("eval", eval, replace=True)
-
-    # Set default task for this runner script if not passed
-    if not any(arg.startswith("task=") for arg in sys.argv):
-        sys.argv.append("task=maniskill_wrist_cam_gs_stack")
 
     class DummyExtractor:
         def __init__(self):
@@ -302,16 +299,14 @@ if __name__ == "__main__":
             pass
 
         def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-            B = obs_dict['gs_positions'].shape[0]
-            N = obs_dict['gs_positions'].shape[2]
-            self.obs_encoder.extractor._latest_pool_indices = torch.arange(N, dtype=torch.long, device=self.device)
-            action = torch.rand((B, self.action_steps, self.action_dim), device=self.device)
+            self.obs_encoder.extractor._latest_pool_indices = torch.arange(1024, dtype=torch.long, device=self.device)
+            action = torch.rand((1, self.action_steps, self.action_dim), device=self.device)
             return {'action': action}
 
     @hydra.main(
         version_base=None,
         config_path="../config",
-        config_name="wrist_cam_gsplat_dp3",
+        config_name="wrist_cam_dp3",
     )
     def main(cfg):
         output_dir = "test_eval_output"

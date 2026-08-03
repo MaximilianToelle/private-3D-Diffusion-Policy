@@ -96,7 +96,7 @@ class ManiSkillDP3BaseObsWrapper(gym.Env):
             if len(qpos.shape) > 1:
                 qpos = qpos[0]
             agent_proprio = qpos.float()
-        elif self.representation_space == "relative_ee_pose":
+        elif self.representation_space in ("relative_ee_pose", "abs_ee_pose"):
             tcp_pose = obs['extra']['tcp_pose']
             gripper_state = obs['agent']['qpos'][..., -2:]
             if len(tcp_pose.shape) > 1:

@@ -1,5 +1,5 @@
 defaults:
-  - maniskill_base
+  - maniskill_wrist_cam_stack
   - _self_
 
 name: maniskill_wrist_cam_gs_stack
@@ -47,13 +47,6 @@ shape_meta: &shape_meta
       type: spatial
 
 env_runner:
-  _target_: diffusion_policy_3d.env_runner.maniskill_runner.ManiSkillRunner
-  task_name: StackFr3WristCamSimpleEnv-v1
-  representation_space: ${task.representation_space}
-  agent_proprio_dim: ${task.shape_meta.obs.agent_proprio.shape[0]}
-  n_obs_steps: ${n_obs_steps}
-  n_action_steps: ${n_action_steps}
-
   # For running pcd baseline on Gaussian means
   obs_key_aliases:
     point_cloud: gs_positions
@@ -88,8 +81,7 @@ dataset:
   min_opacity: ${task.min_opacity}
   num_gaussians: ${task.num_gaussians}
 
-# If needed, add GPU augmentations from dataset/data_augmentations.py here. 
-# List entries get chained and executed in sequence
+# train_data_augmentations / val_data_augmentations default to [] in maniskill_base.
+# If needed, override here with GPU augmentations from dataset/data_augmentations.py
+# (list entries get chained and executed in sequence).
 # NOTE: WristCamGSManiskillDataset does active+high-opacity filter and downsample to num_gaussians on the cpu
-train_data_augmentations: []
-val_data_augmentations: []

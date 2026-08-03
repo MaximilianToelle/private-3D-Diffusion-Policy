@@ -1,0 +1,25 @@
+# Single source of truth for the spatial-memory point-cloud scene representation
+# (spatial_memory_pcd baseline).
+#
+# The dataset converter (scripts/dataset/conversion/convert_wrist_cam_gsworld_to_spatial_memory_pcd.py)
+# loads THIS file to build the mapper and stamps the effective values into the
+# zarr (meta.attrs["scene_representation"]). At training/eval the env-runner
+# builder composes THIS file (via the wrist_cam_spatial_memory_dp3 defaults list) and asserts
+# it equals the stamp -- the dataset was recorded with these values (e.g. voxel
+# size), so evaluating with different ones would be silently invalid. Editing
+# this file after converting therefore fails loudly: reconvert or revert.
+
+num_points: 1024            # what the policy consumes, sampled per training batch / live obs
+# The zarr stores the FULL deduped memory of every frame, padded to num_stored_points rows
+# and accompanied by a per-frame valid count. Farthest-point sampling down to num_points is a
+# separate step: the PointCloudFPS augmentation of the task config does it batched on the GPU
+# during training, and the observation wrapper does it per step at rollout. Conversion asserts
+# rather than truncates when a frame exceeds the cap, so no point is ever silently dropped.
+num_stored_points: 8000
+
+# SpatialMemoryPcdSceneMapper params (baseline_scene_integration/spatial_memory_pcd_scene_mapper.py)
+# 0.004 guarantees the memory exceeds num_points from frame 0 of EVERY episode
+# (measured min 1053 pts at 0.005, ~1650 at 0.004; ~500 at 0.01), so the sampled cloud is
+# always a true farthest-point subset -- never padded with duplicate points.
+voxel_size: 0.003           # per-body dedup voxel edge [m]
+eliminate_background: true  # keep only robot links + movable actors (drop table/ground)

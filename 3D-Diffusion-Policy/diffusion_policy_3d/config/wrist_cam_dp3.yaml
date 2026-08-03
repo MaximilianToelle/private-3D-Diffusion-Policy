@@ -1,6 +1,0 @@
-defaults:
-  - dp3
-  - override task: maniskill_wrist_cam_stack
-  - _self_
-
-name: train_wrist_cam_dp3

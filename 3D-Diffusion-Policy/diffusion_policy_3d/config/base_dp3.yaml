@@ -26,9 +26,9 @@ policy:
   
   diffusion_step_embed_dim: 128
   down_dims:
-  - 512   # 128
-  - 1024  # 256
-  - 2048  # 512
+  - 512   # 128, 512
+  - 1024  # 256, 1024
+  - 2048  # 512, 2048
 
   encoder_output_dim: 64
   horizon: ${horizon}
@@ -96,6 +96,9 @@ training:
   gradient_accumulate_every: 1
   grad_clip_norm: null         # max_norm for clip_grad_norm_; set to null to disable gradient clipping
   use_ema: True
+  use_torch_compile: True
+  torch_compile_mode: max-autotune        # training compile mode
+  eval_torch_compile_mode: default        # eval compile mode (shorter run; keep warmup cheap)
   rollout_every: 200
   checkpoint_every: ${training.rollout_every}  # checkpoint.topk.monitor_key requires validation rollouts during same epoch!
   val_every: 200
