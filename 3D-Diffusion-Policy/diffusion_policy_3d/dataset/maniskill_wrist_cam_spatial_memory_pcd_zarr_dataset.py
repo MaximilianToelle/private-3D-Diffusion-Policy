@@ -1,10 +1,11 @@
 """Dataset for the spatial_memory_pcd baseline.
 
-Loads the zarr written by scripts/dataset/conversion/
+Loads the zarr(s) written by scripts/dataset/conversion/
 convert_wrist_cam_gsworld_to_spatial_memory_pcd.py, which stores each frame's FULL
 accumulated memory produced by the shared SpatialMemoryPcdSceneMapper, padded to a fixed
 row count and accompanied by num_valid_points, plus the proprio and action keys shared with
-the other converters.
+the other converters. Several converted datasets are pooled through MultiZarrDataset, since
+conversion runs as a job array producing one zarr per recording.
 
 The dataset hands the padded memory over unchanged, together with num_valid_points. Reducing
 it to the num_points the policy consumes is the job of the PointCloudFPS augmentation
@@ -23,14 +24,12 @@ from typing import Dict
 import numpy as np
 import torch
 
-from diffusion_policy_3d.common.replay_buffer import ReplayBuffer
-from diffusion_policy_3d.common.sampler import (
-    SequenceSampler, get_val_mask, downsample_mask)
 from diffusion_policy_3d.dataset.base_dataset import BaseDataset
+from diffusion_policy_3d.dataset.multi_zarr_dataset import MultiZarrDataset
 from diffusion_policy_3d.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 
 
-class WristCamSpatialMemoryPCDManiskillDataset(BaseDataset):
+class WristCamSpatialMemoryPCDManiskillDataset(MultiZarrDataset):
     def __init__(self,
             zarr_path,
             horizon=1,
@@ -41,69 +40,57 @@ class WristCamSpatialMemoryPCDManiskillDataset(BaseDataset):
             val_ratio=0.0,
             max_train_episodes=None,
             ):
-        super().__init__()
-        self.zarr_path = zarr_path
-        self.n_obs_steps = n_obs_steps
-        self.horizon = horizon
-        self.pad_before = pad_before
-        self.pad_after = pad_after
-
-        # The whole dataset is small (point_cloud is (T, N, 3) f32) -- load into RAM.
-        self.replay_buffer = ReplayBuffer.copy_from_path(zarr_path)
-
-        self.actor_keys = [k for k in self.replay_buffer.keys() if k.startswith('actor_pose_')]
-        self.keys = (['point_cloud', 'num_valid_points', 'joint_pos_proprio',
-                      'joint_pos_action'] + self.actor_keys)
-
-        val_mask = get_val_mask(
-            n_episodes=self.replay_buffer.n_episodes,
-            val_ratio=val_ratio,
-            seed=seed
-        )
-        train_mask = ~val_mask
-        train_mask = downsample_mask(
-            mask=train_mask,
-            max_n=max_train_episodes,
-            seed=seed)
-        self.train_mask = train_mask
-        # env runner samples rollout init episodes from this mask
-        self.global_train_mask = train_mask
-
-        self.sampler = SequenceSampler(
-            replay_buffer=self.replay_buffer,
-            sequence_length=horizon,
+        # Opens one replay buffer and one sampler per zarr (the whole dataset is loaded into
+        # RAM, point_cloud is (T, N, 3) f32), splits train/val globally over all of them and
+        # provides the global->local index mapping (dataset/multi_zarr_dataset.py).
+        super().__init__(
+            zarr_path=zarr_path,
+            horizon=horizon,
+            n_obs_steps=n_obs_steps,
             pad_before=pad_before,
             pad_after=pad_after,
-            episode_mask=train_mask,
-            keys=self.keys
+            seed=seed,
+            val_ratio=val_ratio,
+            max_train_episodes=max_train_episodes,
         )
 
-    def get_validation_dataset(self):
-        val_set = copy.copy(self)
-        val_set.sampler = SequenceSampler(
-            replay_buffer=self.replay_buffer,
-            sequence_length=self.horizon,
-            pad_before=self.pad_before,
-            pad_after=self.pad_after,
-            episode_mask=~self.train_mask,
-            keys=self.keys,
-        )
-        val_set.train_mask = ~self.train_mask
-        val_set.global_train_mask = ~self.train_mask
-        return val_set
+        # Datasets converted with different mapper params must not be mixed, for the reason the
+        # env-runner builder asserts the stamp against the composed config: the recorded clouds
+        # would come from different scene representations.
+        self.scene_representation = None
+        for path, buf in zip(self.zarr_paths, self.replay_buffers):
+            meta = buf.root['meta']
+            attrs = meta if isinstance(meta, dict) else meta.attrs
+            assert 'scene_representation' in attrs, (
+                f"{path} lacks meta.attrs scene_representation -- reconvert it with the "
+                "current convert_wrist_cam_gsworld_to_spatial_memory_pcd.py.")
+            if self.scene_representation is None:
+                self.scene_representation = attrs['scene_representation']
+            assert attrs['scene_representation'] == self.scene_representation, (
+                f"{path} was converted with a different scene_representation than "
+                f"{self.zarr_paths[0]} -- mixing them in one training run is invalid.\n"
+                f"  {self.zarr_paths[0]}: {self.scene_representation}\n  {path}: "
+                f"{attrs['scene_representation']}")
 
-    def get_episode_init_data(self, episode_idx):
+    def _sampler_keys(self):
+        return (['point_cloud', 'num_valid_points', 'joint_pos_proprio',
+                 'joint_pos_action'] + self.actor_keys)
+
+    def get_episode_init_data(self, global_episode_idx):
         """Init state + expert trajectory of one episode, used by the env runner to
         reproduce dataset initial conditions for rollouts."""
-        episode_ends = self.replay_buffer.episode_ends[:]
-        start_idx = int(episode_ends[episode_idx - 1]) if episode_idx > 0 else 0
-        end_idx = int(episode_ends[episode_idx])
+        buf_idx, local_ep_idx = self._global_episode_to_local(global_episode_idx)
+        replay_buffer = self.replay_buffers[buf_idx]
+
+        episode_ends = replay_buffer.episode_ends[:]
+        start_idx = int(episode_ends[local_ep_idx - 1]) if local_ep_idx > 0 else 0
+        end_idx = int(episode_ends[local_ep_idx])
 
         init_state = {
-            'actor_poses': {k: self.replay_buffer[k][start_idx] for k in self.actor_keys},
-            'agent_pos': self.replay_buffer['joint_pos_proprio'][start_idx],
+            'actor_poses': {k: replay_buffer[k][start_idx] for k in self.actor_keys},
+            'agent_pos': replay_buffer['joint_pos_proprio'][start_idx],
         }
-        expert_trajectory = self.replay_buffer['joint_pos_proprio'][start_idx:end_idx]
+        expert_trajectory = replay_buffer['joint_pos_proprio'][start_idx:end_idx]
         return init_state, expert_trajectory
 
     def get_normalizer(self, **kwargs):
@@ -111,20 +98,28 @@ class WristCamSpatialMemoryPCDManiskillDataset(BaseDataset):
         for the point cloud, per-DOF min/max for action/proprio with the gripper dims
         (already in [-1, 1]) forced to identity -- same conventions as the gsplat
         dataset's abs_joint_pos normalizer."""
-        # Expand the per-episode train flag to a per-frame one by repeating each flag over the
-        # length of its episode.
-        episode_ends = self.replay_buffer.episode_ends[:]
-        frame_mask = np.repeat(self.train_mask, np.diff(episode_ends, prepend=0))
+        # Expand each buffer's per-episode train flag to a per-frame one by repeating each flag
+        # over the length of its episode. Actions and proprio are small, so the train frames of
+        # all buffers are concatenated and the stats computed over them at once.
+        per_buffer_frame_indices = []
+        actions = []
+        agent_proprios = []
+        for replay_buffer, train_mask in zip(self.replay_buffers, self.per_buffer_train_masks):
+            episode_ends = replay_buffer.episode_ends[:]
+            frame_mask = np.repeat(train_mask, np.diff(episode_ends, prepend=0))
+            per_buffer_frame_indices.append(np.flatnonzero(frame_mask))
+            actions.append(replay_buffer['joint_pos_action'][frame_mask])
+            agent_proprios.append(replay_buffer['joint_pos_proprio'][frame_mask])
 
-        action = torch.from_numpy(self.replay_buffer['joint_pos_action'][frame_mask])
-        agent_proprio = torch.from_numpy(self.replay_buffer['joint_pos_proprio'][frame_mask])
+        action = torch.from_numpy(np.concatenate(actions))
+        agent_proprio = torch.from_numpy(np.concatenate(agent_proprios))
 
         normalizer = LinearNormalizer()
 
         # --- Positions (preserving 3D aspect ratio) ---
         # The cloud is scaled by ONE radius on all three axes, so the scene keeps its true
         # proportions and only the largest axis reaches the [-1, 1] boundary.
-        pos_min, pos_max, pos_mean, pos_std = self._point_cloud_stats(np.flatnonzero(frame_mask))
+        pos_min, pos_max, pos_mean, pos_std = self._point_cloud_stats(per_buffer_frame_indices)
         geometric_center = (pos_max + pos_min) / 2.0
         max_radius = torch.clamp((pos_max - pos_min).max() / 2.0, min=1e-4)
         normalizer['point_cloud'] = SingleFieldLinearNormalizer.create_manual(
@@ -158,41 +153,40 @@ class WristCamSpatialMemoryPCDManiskillDataset(BaseDataset):
         normalizer.to(torch.float32)
         return normalizer
 
-    def _point_cloud_stats(self, frame_indices):
+    def _point_cloud_stats(self, per_buffer_frame_indices):
         """Component-wise min, max, mean and standard deviation over the valid points of the
-        given frames. The frames are walked in blocks, because materializing every padded cloud
-        of the dataset at once would copy several gigabytes, and the padding rows have to be
-        excluded or they would drag the statistics towards the origin. Mean and standard
-        deviation come from running sums accumulated in the same pass, in float64 because
-        summing millions of coordinates in float32 loses precision."""
+        given frames, accumulated across all buffers. The frames are walked in blocks, because
+        materializing every padded cloud of the dataset at once would copy several gigabytes,
+        and the padding rows have to be excluded or they would drag the statistics towards the
+        origin. Mean and standard deviation come from running sums accumulated in the same
+        pass, in float64 because summing millions of coordinates in float32 loses precision."""
         pos_min = torch.full((3,), float('inf'))
         pos_max = torch.full((3,), float('-inf'))
         coordinate_sum = torch.zeros(3, dtype=torch.float64)
         squared_coordinate_sum = torch.zeros(3, dtype=torch.float64)
         num_points = 0
-        num_valid_points = self.replay_buffer['num_valid_points']
-        for start in range(0, len(frame_indices), 512):
-            block = frame_indices[start:start + 512]
-            clouds = self.replay_buffer['point_cloud'][block]
-            is_valid = (np.arange(clouds.shape[1])[None, :]
-                        < num_valid_points[block][:, None])
-            points = torch.from_numpy(clouds[is_valid])
-            pos_min = torch.minimum(pos_min, points.min(dim=0)[0])
-            pos_max = torch.maximum(pos_max, points.max(dim=0)[0])
-            coordinate_sum += points.to(torch.float64).sum(dim=0)
-            squared_coordinate_sum += points.to(torch.float64).square().sum(dim=0)
-            num_points += points.shape[0]
+        for replay_buffer, frame_indices in zip(self.replay_buffers, per_buffer_frame_indices):
+            num_valid_points = replay_buffer['num_valid_points']
+            for start in range(0, len(frame_indices), 512):
+                block = frame_indices[start:start + 512]
+                clouds = replay_buffer['point_cloud'][block]
+                is_valid = (np.arange(clouds.shape[1])[None, :]
+                            < num_valid_points[block][:, None])
+                points = torch.from_numpy(clouds[is_valid])
+                pos_min = torch.minimum(pos_min, points.min(dim=0)[0])
+                pos_max = torch.maximum(pos_max, points.max(dim=0)[0])
+                coordinate_sum += points.to(torch.float64).sum(dim=0)
+                squared_coordinate_sum += points.to(torch.float64).square().sum(dim=0)
+                num_points += points.shape[0]
 
         pos_mean = coordinate_sum / num_points
         pos_variance = squared_coordinate_sum / num_points - pos_mean.square()
         return (pos_min, pos_max, pos_mean.to(torch.float32),
                 pos_variance.clamp(min=0.0).sqrt().to(torch.float32))
 
-    def __len__(self) -> int:
-        return len(self.sampler)
-
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        sample = self.sampler.sample_sequence(idx)
+        buf_idx, local_idx = self._global_sample_to_local(idx)
+        sample = self.samplers[buf_idx].sample_sequence(local_idx)
 
         data = {
             'obs': {

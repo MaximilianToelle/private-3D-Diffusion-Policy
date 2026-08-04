@@ -76,7 +76,10 @@ env_runner:
 
 dataset:
   _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_zarr_dataset.WristCamGSManiskillDataset
-  zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_1_new_key_names_positions_surf_normals_opacities_active_gaussians_mask_semantics
+  # One entry per converted dataset
+  zarr_path:
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_1_new_key_names_positions_surf_normals_opacities_active_gaussians_mask_semantics
+    
   representation_space: ${task.representation_space}
   min_opacity: ${task.min_opacity}
   num_gaussians: ${task.num_gaussians}

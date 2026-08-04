@@ -134,22 +134,25 @@ def spatial_memory_pcd(
         SpatialMemoryPcdSceneMapper,
     )
 
-    # tripwire: composed config must equal what the dataset was converted with
-    # (json round-trip normalizes container types on both sides)
+    from diffusion_policy_3d.dataset.multi_zarr_dataset import discover_zarr_paths
+
+    # tripwire: composed config must equal what EVERY dataset of the training run was
+    # converted with (json round-trip normalizes container types on both sides)
     composed = json.loads(json.dumps(OmegaConf.to_container(scene_representation, resolve=True)))
-    stored_attrs = dict(zarr.open_group(zarr_path, mode="r")["meta"].attrs)
-    assert "scene_representation" in stored_attrs, (
-        f"{zarr_path} lacks meta.attrs scene_representation -- reconvert with the "
-        "current convert_wrist_cam_gsworld_to_spatial_memory_pcd.py."
-    )
-    stored = json.loads(json.dumps(stored_attrs["scene_representation"]))
-    assert composed == stored, (
-        "scene_representation config does not match the one the dataset was "
-        f"converted with.\n  composed (config/scene_representation/*.yaml): {composed}\n"
-        f"  stored (zarr meta.attrs of {zarr_path}): {stored}\n"
-        "The dataset was recorded with the stored values -- evaluating with "
-        "different ones is invalid. Revert the yaml or reconvert the dataset."
-    )
+    for path in discover_zarr_paths(zarr_path):
+        stored_attrs = dict(zarr.open_group(path, mode="r")["meta"].attrs)
+        assert "scene_representation" in stored_attrs, (
+            f"{path} lacks meta.attrs scene_representation -- reconvert with the "
+            "current convert_wrist_cam_gsworld_to_spatial_memory_pcd.py."
+        )
+        stored = json.loads(json.dumps(stored_attrs["scene_representation"]))
+        assert composed == stored, (
+            "scene_representation config does not match the one the dataset was "
+            f"converted with.\n  composed (config/scene_representation/*.yaml): {composed}\n"
+            f"  stored (zarr meta.attrs of {path}): {stored}\n"
+            "The dataset was recorded with the stored values -- evaluating with "
+            "different ones is invalid. Revert the yaml or reconvert the dataset."
+        )
 
     scene_mapper = SpatialMemoryPcdSceneMapper(
         voxel_size=composed["voxel_size"],

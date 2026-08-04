@@ -46,7 +46,13 @@ env_runner:
 
 dataset:
   _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_spatial_memory_pcd_zarr_dataset.WristCamSpatialMemoryPCDManiskillDataset
-  zarr_path: /home/max/projects/gsplat_policy/datasets/spatial_memory_pcd/stack_wrist_cam
+  # One entry per converted dataset
+  zarr_path:
+    - /home/max/projects/gsplat_policy/datasets/spatial_memory_pcd/stack_wrist_cam_1
+    - /home/max/projects/gsplat_policy/datasets/spatial_memory_pcd/stack_wrist_cam_2
+    - /home/max/projects/gsplat_policy/datasets/spatial_memory_pcd/stack_wrist_cam_3
+    - /home/max/projects/gsplat_policy/datasets/spatial_memory_pcd/stack_wrist_cam_4
+    - /home/max/projects/gsplat_policy/datasets/spatial_memory_pcd/stack_wrist_cam_5
 
 # The dataset hands over the full padded memory of every observation step; reducing it to
 # num_points happens here, batched on the GPU (~9 ms per batch, against ~0.7 s when the
