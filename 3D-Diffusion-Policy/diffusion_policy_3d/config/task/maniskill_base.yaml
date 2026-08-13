@@ -37,8 +37,17 @@ dataset:
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}
   seed: 42
+  # Validation is ALWAYS every episode that is not trained on, for the validation loss and the
+  # validation rollouts alike, so the two are never measured on different episodes.
+  #   max_train_episodes: null -> train on everything but the val_ratio share, validate on that
+  #     share. Use this when the dataset size is unknown, e.g. when pooling several zarrs.
+  #   max_train_episodes: K    -> train on K episodes, validate on ALL others; val_ratio then
+  #     only shifts which episodes are eligible for training and can stay 0. Single-trajectory
+  #     training therefore validates against the whole rest of the dataset.
+  # val_ratio: 0 with max_train_episodes: null holds nothing out: no validation loss and no
+  # validation rollout.
   val_ratio: 0.1
-  max_train_episodes: null  # null: use max number of train episodes while respecting val_ratio
+  max_train_episodes: null
 
 # Default: no GPU data augmentations. Leaves override when they need them.
 train_data_augmentations: []

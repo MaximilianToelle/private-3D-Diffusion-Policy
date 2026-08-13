@@ -14,6 +14,8 @@ import os
 from typing import List
 
 import numpy as np
+import psutil
+import zarr
 
 from diffusion_policy_3d.common.replay_buffer import ReplayBuffer
 from diffusion_policy_3d.common.sampler import (
@@ -47,11 +49,21 @@ class MultiZarrDataset(BaseDataset):
         # =====================================================================
         # Open all replay buffers
         # =====================================================================
+        # Zarr must never be read lazily during training: Copy everything into RAM when it fits, otherwise fall back to
+        # raw memmap caches read through the OS page cache without decompression. Both
+        # back the buffers with ndarray-like arrays, so all downstream indexing works.
+        uncompressed_bytes = sum(
+            array.nbytes for path in self.zarr_paths
+            for array in zarr.open(path, mode='r')['data'].values())
+        # headroom for the model, CUDA context and the workers' prefetched batches
+        fits_in_ram = uncompressed_bytes < 0.6 * psutil.virtual_memory().available
+        if not fits_in_ram:
+            print(f"[{type(self).__name__}] {uncompressed_bytes / 2**30:.1f} GiB uncompressed "
+                  "exceeds the available RAM headroom -- reading through memmap caches")
         self.replay_buffers: List[ReplayBuffer] = []
         for path in self.zarr_paths:
-            # buf = ReplayBuffer.create_from_path(path, mode='r')
-            buf = ReplayBuffer.copy_from_path(path)
-
+            buf = (ReplayBuffer.copy_from_path(path) if fits_in_ram
+                   else memmap_replay_buffer(path))
             self.replay_buffers.append(buf)
 
         # Every zarr of one task holds the same actors, so they are read once and verified.
@@ -81,6 +93,15 @@ class MultiZarrDataset(BaseDataset):
             mask=global_train_mask,
             max_n=max_train_episodes,
             seed=seed)
+
+        # EVERY episode that is not trained on is validation, so val_ratio only decides the
+        # split when training uses all remaining episodes, while max_train_episodes hands the
+        # rest to validation -- training on one trajectory validates on all others. It also
+        # keeps the validation loss and the validation rollouts on the SAME episodes: both read
+        # from this mask, the loss through per_buffer_val_masks and the env runner through the
+        # global mask that get_validation_dataset swaps in.
+        global_val_mask = ~global_train_mask
+        self.global_val_mask = global_val_mask
 
         # Slice global masks into per-buffer masks
         self.per_buffer_train_masks = []
@@ -135,6 +156,14 @@ class MultiZarrDataset(BaseDataset):
         local_idx = global_episode_idx if buf_idx == 0 else global_episode_idx - int(self._episode_cumcounts[buf_idx - 1])
         return buf_idx, int(local_idx)
 
+    def _episode_frame_range(self, global_episode_idx):
+        """Map a global episode index to the buffer holding it and its (start, end) frame rows."""
+        buf_idx, local_ep_idx = self._global_episode_to_local(global_episode_idx)
+        buf = self.replay_buffers[buf_idx]
+        start_idx = int(buf.episode_ends[local_ep_idx - 1]) if local_ep_idx > 0 else 0
+        end_idx = int(buf.episode_ends[local_ep_idx])
+        return buf, start_idx, end_idx
+
     # =====================================================================
     # Validation dataset
     # =====================================================================
@@ -152,7 +181,9 @@ class MultiZarrDataset(BaseDataset):
             ))
         val_set._sampler_lengths = [len(s) for s in val_set.samplers]
         val_set._cumulative_lengths = np.cumsum(val_set._sampler_lengths)
-        val_set.global_train_mask = ~self.global_train_mask
+        # the env runner draws rollout init episodes from global_train_mask, so the validation
+        # set advertises its own episodes there -- the ones its samplers use
+        val_set.global_train_mask = self.global_val_mask
         # Swap masks so get_episode_init_data picks from val episodes
         val_set.per_buffer_train_masks = self.per_buffer_val_masks
         val_set.per_buffer_val_masks = self.per_buffer_train_masks
@@ -160,6 +191,43 @@ class MultiZarrDataset(BaseDataset):
 
     def __len__(self) -> int:
         return int(self._cumulative_lengths[-1]) if len(self._cumulative_lengths) > 0 else 0
+
+
+def memmap_replay_buffer(zarr_path) -> ReplayBuffer:
+    """ReplayBuffer over read-only raw memmaps of the zarr's data arrays.
+
+    The .dat files live next to the zarr's compressed arrays and are written once on
+    first use (one sequential decompression pass); afterwards opening is instant and
+    training reads raw bytes through the OS page cache. The zarr stays the canonical
+    format, the .dat files are a derived cache. meta is small and loaded into plain
+    numpy with the zarr attrs mixed in, exactly like ReplayBuffer's numpy backend.
+    """
+    zarr_path = os.path.expanduser(zarr_path)
+    root = zarr.open(zarr_path, mode='r')
+
+    meta = dict(root['meta'].attrs)
+    for key, value in root['meta'].items():
+        meta[key] = value[:] if value.shape else np.array(value)
+
+    data = {}
+    for key, array in root['data'].items():
+        dat_path = os.path.join(zarr_path, 'data', f'{key}.dat')
+        if not os.path.exists(dat_path):
+            print(f"[memmap_replay_buffer] writing {dat_path} "
+                  f"({array.nbytes / 2**30:.1f} GiB, once per dataset)")
+            # write under a per-process name and rename atomically, so a killed job or
+            # parallel sweep jobs converting the same dataset never leave a truncated
+            # cache behind (np.memmap preallocates, a partial write would read as zeros)
+            partial_path = f"{dat_path}.tmp{os.getpid()}"
+            writable = np.memmap(partial_path, dtype=array.dtype, mode='w+', shape=array.shape)
+            for start in range(0, array.shape[0], 256):
+                writable[start:start + 256] = array[start:start + 256]
+            writable.flush()
+            del writable
+            os.rename(partial_path, dat_path)
+        data[key] = np.memmap(dat_path, dtype=array.dtype, mode='r', shape=array.shape)
+
+    return ReplayBuffer(root={'meta': meta, 'data': data})
 
 
 def discover_zarr_paths(zarr_path) -> List[str]:

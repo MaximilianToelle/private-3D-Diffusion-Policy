@@ -40,9 +40,10 @@ class WristCamSpatialMemoryPCDManiskillDataset(MultiZarrDataset):
             val_ratio=0.0,
             max_train_episodes=None,
             ):
-        # Opens one replay buffer and one sampler per zarr (the whole dataset is loaded into
-        # RAM, point_cloud is (T, N, 3) f32), splits train/val globally over all of them and
-        # provides the global->local index mapping (dataset/multi_zarr_dataset.py).
+        # Opens one replay buffer and one sampler per zarr (loaded into RAM when it fits,
+        # read through raw memmap caches otherwise; point_cloud is (T, N, 3) f32), splits
+        # train/val globally over all of them and provides the global->local index mapping
+        # (dataset/multi_zarr_dataset.py).
         super().__init__(
             zarr_path=zarr_path,
             horizon=horizon,
@@ -79,12 +80,7 @@ class WristCamSpatialMemoryPCDManiskillDataset(MultiZarrDataset):
     def get_episode_init_data(self, global_episode_idx):
         """Init state + expert trajectory of one episode, used by the env runner to
         reproduce dataset initial conditions for rollouts."""
-        buf_idx, local_ep_idx = self._global_episode_to_local(global_episode_idx)
-        replay_buffer = self.replay_buffers[buf_idx]
-
-        episode_ends = replay_buffer.episode_ends[:]
-        start_idx = int(episode_ends[local_ep_idx - 1]) if local_ep_idx > 0 else 0
-        end_idx = int(episode_ends[local_ep_idx])
+        replay_buffer, start_idx, end_idx = self._episode_frame_range(global_episode_idx)
 
         init_state = {
             'actor_poses': {k: replay_buffer[k][start_idx] for k in self.actor_keys},

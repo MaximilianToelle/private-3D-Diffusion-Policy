@@ -142,6 +142,10 @@ class ManiSkillRunner(BaseRunner):
                 # Pick a random episode from the global train/val mask.
                 # NOTE: global_train_mask is set to the val_mask in the validation dataset.
                 valid_episode_indices = np.where(dataset.global_train_mask)[0]
+                assert len(valid_episode_indices) > 0, (
+                    "the dataset holds no episodes to draw rollout initial states from -- "
+                    "with val_ratio=0 and max_train_episodes unset nothing is held out for "
+                    "validation, so pass dataset=None to roll out from random initial states")
                 random_episode_idx = np.random.choice(valid_episode_indices)
                 # get_episode_init_data handles multi-buffer routing internally.
                 init_state, expert_trajectory = dataset.get_episode_init_data(random_episode_idx)

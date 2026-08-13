@@ -174,12 +174,8 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
                 - abs_joint_pos: joint state (qpos) trajectory
                 - relative_ee_pose: tcp_pose (7D) + gripper_state (2D) = 9D trajectory
         """
-        buf_idx, local_ep_idx = self._global_episode_to_local(global_episode_idx)
-        buf = self.replay_buffers[buf_idx]
-        
-        start_idx = int(buf.episode_ends[local_ep_idx - 1]) if local_ep_idx > 0 else 0
-        end_idx = int(buf.episode_ends[local_ep_idx])
-        
+        buf, start_idx, end_idx = self._episode_frame_range(global_episode_idx)
+
         init_state = dict()
         if len(self.actor_keys) > 0:
             init_state['actor_poses'] = {
