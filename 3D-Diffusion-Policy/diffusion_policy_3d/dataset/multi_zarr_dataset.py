@@ -56,7 +56,7 @@ class MultiZarrDataset(BaseDataset):
             array.nbytes for path in self.zarr_paths
             for array in zarr.open(path, mode='r')['data'].values())
         # headroom for the model, CUDA context and the workers' prefetched batches
-        fits_in_ram = uncompressed_bytes < 0.6 * psutil.virtual_memory().available
+        fits_in_ram = uncompressed_bytes < 0.6 * available_ram_bytes()
         if not fits_in_ram:
             print(f"[{type(self).__name__}] {uncompressed_bytes / 2**30:.1f} GiB uncompressed "
                   "exceeds the available RAM headroom -- reading through memmap caches")
@@ -191,6 +191,18 @@ class MultiZarrDataset(BaseDataset):
 
     def __len__(self) -> int:
         return int(self._cumulative_lengths[-1]) if len(self._cumulative_lengths) > 0 else 0
+
+
+def available_ram_bytes() -> int:
+    """Node-wide free RAM capped by the SLURM job allocation: psutil sees the whole
+    node, but slurmstepd OOM-kills the job at its (much smaller) cgroup limit."""
+    available = psutil.virtual_memory().available
+    if 'SLURM_MEM_PER_NODE' in os.environ:  # sbatch --mem (hydra launcher mem_gb)
+        available = min(available, int(os.environ['SLURM_MEM_PER_NODE']) * 2**20)
+    elif 'SLURM_MEM_PER_CPU' in os.environ:  # sbatch --mem-per-cpu
+        available = min(available, int(os.environ['SLURM_MEM_PER_CPU']) * 2**20
+                        * int(os.environ['SLURM_CPUS_ON_NODE']))
+    return available
 
 
 def memmap_replay_buffer(zarr_path) -> ReplayBuffer:
