@@ -104,14 +104,14 @@ def spatial_memory_pcd(
     agent_proprio_dim,
     cam_name,
     scene_representation,
-    zarr_path,
+    dataset_path,
 ):
     """
     Spatial memory point-cloud perception head.
 
     Mapper params come from the composed scene_representation config
     (config/scene_representation/spatial_memory_pcd.yaml -- the same file the
-    dataset converter loaded and stamped into the zarr). We ASSERT the composed
+    dataset converter loaded and stamped into the dataset). We ASSERT the composed
     config equals that stamp: the dataset was recorded with these values (e.g.
     voxel size), so evaluating with different ones would be a silently invalid
     comparison.
@@ -134,17 +134,16 @@ def spatial_memory_pcd(
     )
 
     from diffusion_policy_3d.dataset.multi_memmap_dataset import (
-        META_FILENAME, dataset_attrs, discover_dataset_paths)
+        dataset_attrs, discover_dataset_paths)
 
     # tripwire: composed config must equal what EVERY dataset of the training run was
     # converted with (json round-trip normalizes container types on both sides).
-    # dataset_attrs reads memmap AND zarr datasets while both formats are around.
     composed = json.loads(json.dumps(OmegaConf.to_container(scene_representation, resolve=True)))
-    for path in discover_dataset_paths(zarr_path, markers=(META_FILENAME, ".zgroup")):
+    for path in discover_dataset_paths(dataset_path):
         stored_attrs = dataset_attrs(path)
         assert "scene_representation" in stored_attrs, (
             f"{path} lacks a scene_representation stamp -- reconvert with the "
-            "current convert_wrist_cam_gsworld_to_spatial_memory_pcd(_memmap).py."
+            "current convert_wrist_cam_gsworld_to_spatial_memory_pcd_memmap.py."
         )
         stored = json.loads(json.dumps(stored_attrs["scene_representation"]))
         assert composed == stored, (

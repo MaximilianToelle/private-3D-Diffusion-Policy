@@ -62,11 +62,11 @@ def evaluate_action_mse(checkpoint_path: str, dataset_path: str,
 
     # ── Configure dataset ──
     if dataset_path is not None:
-        cfg.task.dataset.zarr_path = dataset_path
+        cfg.task.dataset.dataset_path = dataset_path
     dataset: BaseDataset = hydra.utils.instantiate(cfg.task.dataset)
     assert isinstance(dataset, BaseDataset)
     normalizer = dataset.get_normalizer()
-    cprint(f"Dataset loaded: {len(dataset)} samples from {cfg.task.dataset.zarr_path}", "cyan")
+    cprint(f"Dataset loaded: {len(dataset)} samples from {cfg.task.dataset.dataset_path}", "cyan")
     cprint(f"Training episodes: {np.nonzero(dataset.global_train_mask)[0].tolist()}", "cyan")
 
     # ── Configure augmentations (train augmentations to model training distribution) ──

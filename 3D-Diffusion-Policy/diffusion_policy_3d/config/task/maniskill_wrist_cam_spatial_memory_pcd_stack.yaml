@@ -11,7 +11,7 @@ representation_space: abs_joint_pos
 # The chosen scene-representation params (num_points, num_stored_points, voxel_size,
 # eliminate_background) live in config/scene_representation/spatial_memory_pcd.yaml
 # (composed via the wrist_cam_spatial_memory_dp3 defaults list) — the single source shared by the dataset
-# converter and the eval builder, which asserts it equals the value stamped into the zarr
+# converter and the eval builder, which asserts it equals the value stamped into the dataset
 # at conversion.
 num_points: ${scene_representation.num_points}
 
@@ -34,7 +34,7 @@ env_runner:
     agent_proprio_dim: ${task.shape_meta.obs.agent_proprio.shape[0]}
     cam_name: wrist_cam
     scene_representation: ${scene_representation}
-    zarr_path: ${task.dataset.zarr_path}
+    dataset_path: ${task.dataset.dataset_path}
 
   # Logging / visualization.
   callbacks:
@@ -45,9 +45,9 @@ env_runner:
       representation_space: ${task.representation_space}
 
 dataset:
-  _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_spatial_memory_pcd_zarr_dataset.WristCamSpatialMemoryPCDManiskillDataset
+  _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_spatial_memory_pcd_memmap_dataset.WristCamSpatialMemoryPCDMemmapManiskillDataset
   # One entry per converted dataset
-  zarr_path:
+  dataset_path:
     - /home/max/projects/gsplat_policy/datasets/spatial_memory_pcd/stack_wrist_cam_1
     - /home/max/projects/gsplat_policy/datasets/spatial_memory_pcd/stack_wrist_cam_2
     - /home/max/projects/gsplat_policy/datasets/spatial_memory_pcd/stack_wrist_cam_3

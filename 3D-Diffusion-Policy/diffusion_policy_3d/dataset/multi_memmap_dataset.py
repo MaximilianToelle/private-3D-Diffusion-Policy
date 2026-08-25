@@ -106,14 +106,9 @@ def memmap_replay_buffer(dataset_path) -> ReplayBuffer:
 
 
 def dataset_attrs(dataset_path) -> dict:
-    """The attrs stamped into a converted dataset. Format-agnostic during the zarr ->
-    memmap transition: meta.json if present, the zarr meta.attrs otherwise."""
-    meta_path = os.path.join(dataset_path, META_FILENAME)
-    if os.path.exists(meta_path):
-        with open(meta_path) as file:
-            return json.load(file)['attrs']
-    import zarr
-    return dict(zarr.open_group(dataset_path, mode='r')['meta'].attrs)
+    """The attrs stamped into a converted dataset."""
+    with open(os.path.join(dataset_path, META_FILENAME)) as file:
+        return json.load(file)['attrs']
 
 
 def discover_dataset_paths(dataset_path, markers=(META_FILENAME,)) -> List[str]:

@@ -75,9 +75,9 @@ env_runner:
       representation_space: ${task.representation_space}
 
 dataset:
-  _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_zarr_dataset.WristCamGSManiskillDataset
+  _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_memmap_dataset.WristCamGSMemmapManiskillDataset
   # One entry per converted dataset
-  zarr_path:
+  dataset_path:
     - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_1_positions_surf_normals_opacities_active_gaussians_mask_semantics
     
   representation_space: ${task.representation_space}
@@ -92,4 +92,4 @@ dataset:
 # train_data_augmentations / val_data_augmentations default to [] in maniskill_base.
 # If needed, override here with GPU augmentations from dataset/data_augmentations.py
 # (list entries get chained and executed in sequence).
-# NOTE: WristCamGSManiskillDataset does active+high-opacity filter and downsample to num_gaussians on the cpu
+# NOTE: WristCamGSMemmapManiskillDataset does active+high-opacity filter and downsample to num_gaussians on the cpu

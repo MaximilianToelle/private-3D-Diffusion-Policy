@@ -204,15 +204,9 @@ if __name__ == "__main__":
         config_name="wrist_cam_spatial_memory_dp3"
     )
     def main(cfg):
-        # The task config targets the zarr dataset during the transition, so swap in this
-        # class and read the memmap directories from the CLI:
-        #   python maniskill_wrist_cam_spatial_memory_pcd_memmap_dataset.py \
-        #     +dataset_path=/path/to/parent_or_dataset_dir
-        dataset_cfg = OmegaConf.to_container(cfg.task.dataset, resolve=True)
-        del dataset_cfg['_target_'], dataset_cfg['zarr_path']
         dataset: BaseDataset
-        dataset = WristCamSpatialMemoryPCDMemmapManiskillDataset(
-            dataset_path=cfg.dataset_path, **dataset_cfg)
+        dataset = hydra.utils.instantiate(cfg.task.dataset)
+        assert isinstance(dataset, BaseDataset), f"dataset must be BaseDataset, got {type(dataset)}"
         print(f"Dataset instantiated. Length: {len(dataset)}")
 
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
