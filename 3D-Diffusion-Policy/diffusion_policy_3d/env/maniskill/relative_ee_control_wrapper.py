@@ -64,6 +64,13 @@ class RelativeEEControlWrapper(gym.Wrapper):
         gripper_state = obs['agent_proprio'][..., -2:]      # absolute gripper state
         rel_obs['agent_proprio'] = torch.cat([rel_tcp_pose9d, gripper_state], dim=-1)
 
+        # gs_* tensors live on the GS render device, which under cpu sim differs from
+        # the proprio-derived transform's device
+        if 'gs_positions' in rel_obs:
+            gs_device = rel_obs['gs_positions'].device
+            R_anchor_base_to_tcp = R_anchor_base_to_tcp.to(gs_device)
+            t_anchor_base_to_tcp = t_anchor_base_to_tcp.to(gs_device)
+
         # Transform positions: p_anchor = R_rel @ p_ee(i) + t_rel
         if 'gs_positions' in rel_obs:
             pos = rel_obs['gs_positions']
@@ -92,6 +99,10 @@ class RelativeEEControlWrapper(gym.Wrapper):
         Transform relative EE action in anchor tcp frame to absolute EE action in base frame
         action: (n_action_steps, 10) -> [9D rel pose, 1D gripper]
         """
+
+        # policy actions arrive on the policy device; the anchor matrix (and the env
+        # underneath) live on the sim device
+        action = action.to(self.T_cur_anchor_tcp_to_base.device)
 
         rel_action_pose9d = action[..., :9]
         gripper_action = action[..., 9:]
