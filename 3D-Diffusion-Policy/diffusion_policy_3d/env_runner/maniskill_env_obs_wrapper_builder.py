@@ -127,29 +127,30 @@ def spatial_memory_pcd(
 
     import json
 
-    import zarr
     from omegaconf import OmegaConf
 
     from diffusion_policy_3d.baseline_scene_integration.spatial_memory_pcd_scene_mapper import (
         SpatialMemoryPcdSceneMapper,
     )
 
-    from diffusion_policy_3d.dataset.multi_zarr_dataset import discover_zarr_paths
+    from diffusion_policy_3d.dataset.multi_memmap_dataset import (
+        META_FILENAME, dataset_attrs, discover_dataset_paths)
 
     # tripwire: composed config must equal what EVERY dataset of the training run was
-    # converted with (json round-trip normalizes container types on both sides)
+    # converted with (json round-trip normalizes container types on both sides).
+    # dataset_attrs reads memmap AND zarr datasets while both formats are around.
     composed = json.loads(json.dumps(OmegaConf.to_container(scene_representation, resolve=True)))
-    for path in discover_zarr_paths(zarr_path):
-        stored_attrs = dict(zarr.open_group(path, mode="r")["meta"].attrs)
+    for path in discover_dataset_paths(zarr_path, markers=(META_FILENAME, ".zgroup")):
+        stored_attrs = dataset_attrs(path)
         assert "scene_representation" in stored_attrs, (
-            f"{path} lacks meta.attrs scene_representation -- reconvert with the "
-            "current convert_wrist_cam_gsworld_to_spatial_memory_pcd.py."
+            f"{path} lacks a scene_representation stamp -- reconvert with the "
+            "current convert_wrist_cam_gsworld_to_spatial_memory_pcd(_memmap).py."
         )
         stored = json.loads(json.dumps(stored_attrs["scene_representation"]))
         assert composed == stored, (
             "scene_representation config does not match the one the dataset was "
             f"converted with.\n  composed (config/scene_representation/*.yaml): {composed}\n"
-            f"  stored (zarr meta.attrs of {path}): {stored}\n"
+            f"  stored (stamp of {path}): {stored}\n"
             "The dataset was recorded with the stored values -- evaluating with "
             "different ones is invalid. Revert the yaml or reconvert the dataset."
         )

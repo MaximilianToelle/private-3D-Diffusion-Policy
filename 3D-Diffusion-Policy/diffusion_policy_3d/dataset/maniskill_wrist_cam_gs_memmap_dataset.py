@@ -1,64 +1,32 @@
+"""Gsplat DP3 dataset over the memmap dataset format -- the 1:1 sibling of
+maniskill_wrist_cam_gs_zarr_dataset.py, loading the dataset(s) written by
+scripts/dataset/conversion/convert_wrist_cam_gsworld_to_gsplat_dp3_memmap.py (or repacked
+from a zarr by repack_zarr_dataset_to_memmap.py).
+
+Identical logic, only the storage layer changed: MultiMemmapDataset opens read-only
+np.memmaps instead of zarr-backed replay buffers, so a handful of torch.from_numpy calls
+copy/cast first (a memmap slice is a read-only view, which torch must not wrap directly);
+every copy replaces one that .float() or default collate made anyway.
+"""
+
 import os
-import hashlib
-from typing import Dict, List, Iterator
+from typing import Dict
 import torch
-from torch.utils.data import Sampler
 import numpy as np
 import time
-import zarr
 from tqdm import tqdm
-import copy
 from diffusion_policy_3d.common.sampler import SequenceSampler
 from diffusion_policy_3d.common.streaming_stats import StreamingPercentileHistogram
 from diffusion_policy_3d.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer, PerTimestepLinearNormalizer
 from diffusion_policy_3d.dataset.base_dataset import BaseDataset
-from diffusion_policy_3d.dataset.multi_zarr_dataset import MultiZarrDataset
+from diffusion_policy_3d.dataset.multi_memmap_dataset import MultiMemmapDataset
 from diffusion_policy_3d.common.transform_utils import pose7_to_mat_np, mat_to_pose9d_np
 
-from pytorch3d.ops import sample_farthest_points
 
-
-# TODO: Since we are back to loading all datasets into RAM, we could further optimize this code! 
-
-
-# class DatasetBlockSampler(Sampler[int]):
-#     """
-#     Treats each Zarr dataset as a single block. 
-#     Shuffles the order of the datasets, and shuffles the samples within each dataset.
-#     Exhausts one dataset completely before moving to the next.
-#     """
-#     def __init__(self, cumulative_lengths: List[int]):
-#         self.cumulative_lengths = cumulative_lengths
-#         self.num_datasets = len(cumulative_lengths)
-        
-#         # Each block is simply an entire dataset
-#         self.dataset_blocks = []
-#         start_idx = 0
-#         for end_idx in cumulative_lengths:
-#             self.dataset_blocks.append(np.arange(start_idx, end_idx))
-#             start_idx = end_idx
-    
-#     def __iter__(self) -> Iterator[int]:
-#         # 1. Shuffle the order of the datasets (e.g., [Dataset 2, Dataset 0, Dataset 1])
-#         dataset_order = np.random.permutation(self.num_datasets)
-        
-#         for ds_idx in dataset_order:
-#             # 2. Fully shuffle the indices inside this specific dataset
-#             ds_indices = self.dataset_blocks[ds_idx]
-#             shuffled_indices = np.random.permutation(ds_indices)
-            
-#             # 3. Yield single integers (PyTorch DataLoader will group them into batches of 128!)
-#             for idx in shuffled_indices:
-#                 yield int(idx)
-    
-#     def __len__(self) -> int:
-#         return int(self.cumulative_lengths[-1]) if len(self.cumulative_lengths) > 0 else 0
-
-
-class WristCamGSManiskillDataset(MultiZarrDataset):
+class WristCamGSMemmapManiskillDataset(MultiMemmapDataset):
     def __init__(
         self,
-        zarr_path,
+        dataset_path,
         horizon=1,
         n_obs_steps=1,
         pad_before=0,
@@ -81,10 +49,10 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
             f"representation_space must be 'abs_joint_pos' or 'relative_ee_pose', got '{representation_space}'"
         self.representation_space = representation_space
 
-        # Opens one replay buffer and one sampler per zarr, splits train/val globally over all
-        # of them and provides the global->local index mapping (dataset/multi_zarr_dataset.py).
+        # Opens one replay buffer and one sampler per dataset, splits train/val globally over
+        # all of them and provides the global->local index mapping (dataset/multi_memmap_dataset.py).
         super().__init__(
-            zarr_path=zarr_path,
+            dataset_path=dataset_path,
             horizon=horizon,
             n_obs_steps=n_obs_steps,
             pad_before=pad_before,
@@ -109,14 +77,14 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
         first_buf = self.replay_buffers[0]
         meta = first_buf.root['meta']
         attrs = meta if isinstance(meta, dict) else meta.attrs
-        
+
         try:
             self.gs_params = list(attrs['gs_params'])
             self.gs_param_sizes = list(attrs['gs_param_sizes'])
         except KeyError:
             self.gs_params = ["positions", "rotations_9d", "log_scales", "opacities", "rgbs", "active_gaussians_mask", "surf_normals", "semantics"]
             self.gs_param_sizes = [3, 9, 3, 1, 3, 1, 3, 1]
-        
+
         # Static mapping for parsing the flattened gaussian data
         self.param_slices = {}
         curr = 0
@@ -135,7 +103,7 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
                     f"gs_param_sizes mismatch between dataset 0 and {i}"
             except KeyError:
                 pass
-            
+
         self.param_to_obs_key = {
             'positions': 'gs_positions',
             'rotations_9d': 'gs_rotations_9d',
@@ -157,7 +125,7 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
                 raise ValueError(
                     f"Config min_opacity ({min_opacity}) is below the dataset's "
                     f"min_opacity ({dataset_min_opacity}) in dataset {i} "
-                    f"({self.zarr_paths[i]}). During evaluation the policy would "
+                    f"({self.dataset_paths[i]}). During evaluation the policy would "
                     f"see Gaussians that were pruned during training. "
                     f"Set min_opacity >= {dataset_min_opacity}."
                 )
@@ -172,7 +140,7 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
         """
         Return init state data for a specific global episode index.
         Used by the env runner to reproduce initial conditions from the dataset.
-        
+
         Returns:
             init_state: dict with 'actor_poses' and 'agent_pos'
             expert_trajectory: np.ndarray of the full expert trajectory.
@@ -181,21 +149,22 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
         """
         buf, start_idx, end_idx = self._episode_frame_range(global_episode_idx)
 
+        # np.array copies, since indexing a memmap returns read-only views of the file
         init_state = dict()
         if len(self.actor_keys) > 0:
             init_state['actor_poses'] = {
-                k: buf[k][start_idx] for k in self.actor_keys
+                k: np.array(buf[k][start_idx]) for k in self.actor_keys
             }
-        init_state['agent_pos'] = buf['joint_pos_proprio'][start_idx]
-        
+        init_state['agent_pos'] = np.array(buf['joint_pos_proprio'][start_idx])
+
         if self.representation_space == "abs_joint_pos":
-            expert_trajectory = buf['joint_pos_proprio'][start_idx:end_idx]
+            expert_trajectory = np.array(buf['joint_pos_proprio'][start_idx:end_idx])
         elif self.representation_space == "relative_ee_pose":
             # tcp_pose_proprio: (T, 7) [x,y,z,qw,qx,qy,qz], gripper: last 2 dims of joint_pos_proprio
             tcp_pose_proprio = buf['tcp_pose_proprio'][start_idx:end_idx]
             gripper_state = buf['joint_pos_proprio'][start_idx:end_idx][:, -2:]
             expert_trajectory = np.concatenate([tcp_pose_proprio, gripper_state], axis=-1)  # (T, 9)
-        
+
         return init_state, expert_trajectory
 
     # =====================================================================
@@ -203,7 +172,7 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
     # =====================================================================
     def get_normalizer(self, **kwargs):
         print(f"Computing normalization stats over {len(self.replay_buffers)} training dataset(s)...")
-        
+
         if self.representation_space == "abs_joint_pos":
             return self._get_normalizer_abs_joint_pos()
         elif self.representation_space == "relative_ee_pose":
@@ -222,7 +191,7 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
         if 'log_scales' in self.gs_params:
             # For Gaussian normalization, we need mean and std.
             # We track count, sum, and sum of squares (using float64 to prevent numerical instability)
-            stats['gs_log_scales'] = {'count': 0, 'sum': 0.0, 'sum_sq': 0.0} 
+            stats['gs_log_scales'] = {'count': 0, 'sum': 0.0, 'sum_sq': 0.0}
 
         def update_min_max(key, tensor):
             flat_tensor = tensor.reshape(-1, tensor.shape[-1])
@@ -240,13 +209,13 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
             norm_mask = self.per_buffer_train_masks[buf_i]
             norm_keys = ['joint_pos_action', 'joint_pos_proprio', 'gsplats']      # actor poses are only used for reproducing init states
             normalization_sampler = SequenceSampler(
-                replay_buffer=buf, 
+                replay_buffer=buf,
                 sequence_length=1, pad_before=0, pad_after=0,
                 episode_mask=norm_mask, keys=norm_keys
             )
             seq_length = getattr(normalization_sampler, 'sequence_length')
             indices = range(len(normalization_sampler))[::seq_length]
-            
+
             desc = f"Streaming dataset {buf_i+1}/{len(self.replay_buffers)} for normalization stats"
             for idx in tqdm(indices, desc=desc):
                 sample = normalization_sampler.sample_sequence(idx)
@@ -257,11 +226,11 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
                 update_min_max('agent_proprio', obs['agent_proprio'])
                 if 'positions' in self.gs_params:
                     update_min_max('gs_positions', obs['gs_positions'])
-                
+
                 if 'log_scales' in self.gs_params:
                 # Update sum and sum of squares for log_scales
                 # NOTE: We compute a single, global mean and std across scaling dimensions
-                # -> A Gaussian can rotate 90 degree and swap its x- and y-scales without changing its appearance!   
+                # -> A Gaussian can rotate 90 degree and swap its x- and y-scales without changing its appearance!
                 # NOTE: We cast to .double() to prevent catastrophic cancellation in large sum operations
                     log_scales_flat = obs['gs_log_scales'].reshape(-1).double()
                     stats['gs_log_scales']['count'] += log_scales_flat.shape[0]
@@ -289,9 +258,9 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
                 scale=torch.full((3,), 1.0 / std_log_scales.item(), dtype=torch.float32),
                 offset=torch.full((3,), -mean_log_scales.item() / std_log_scales.item(), dtype=torch.float32),
                 input_stats_dict={
-                    'min': torch.full((3,), mean_log_scales.item() - 3*std_log_scales.item()), 
+                    'min': torch.full((3,), mean_log_scales.item() - 3*std_log_scales.item()),
                     'max': torch.full((3,), mean_log_scales.item() + 3*std_log_scales.item()),
-                    'mean': torch.full((3,), mean_log_scales.item()), 
+                    'mean': torch.full((3,), mean_log_scales.item()),
                     'std': torch.full((3,), std_log_scales.item())
                 }
             )
@@ -306,7 +275,7 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
         if 'opacities' in self.gs_params:
             # got processed with sigmoid -> [0, 1]
             normalizer['gs_opacities'] = SingleFieldLinearNormalizer.create_manual(
-                scale=torch.tensor([2.0], dtype=torch.float32), 
+                scale=torch.tensor([2.0], dtype=torch.float32),
                 offset=torch.tensor([-1.0], dtype=torch.float32),
                 input_stats_dict={
                     'min': torch.tensor([0.0]), 'max': torch.tensor([1.0]),
@@ -317,7 +286,7 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
         if 'rgbs' in self.gs_params:
             # got processed to be normalized between [0, 1]
             normalizer['gs_rgb'] = SingleFieldLinearNormalizer.create_manual(
-                scale=torch.tensor([2.0, 2.0, 2.0], dtype=torch.float32), 
+                scale=torch.tensor([2.0, 2.0, 2.0], dtype=torch.float32),
                 offset=torch.tensor([-1.0, -1.0, -1.0], dtype=torch.float32),
                 input_stats_dict={
                     'min': torch.zeros(3), 'max': torch.ones(3),
@@ -503,7 +472,7 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
           frames, e.g. 16), because the policy predicts a full horizon of actions. But the
           policy only CONDITIONS on a short observation history (`n_obs_steps` frames, e.g. 2).
           So instead of loading all 16 heavy Gaussian frames and throwing 14 away, we read
-          only the first `n_obs_steps` of that window. 
+          only the first `n_obs_steps` of that window.
 
         THE four indices (from SequenceSampler.create_indices) describe the horizon window:
           - array_start / array_end : the physical row range in `array` that actually
@@ -547,7 +516,7 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
             pad_count = min(pad_before, self.n_obs_steps)
             obs_slice[:pad_count] = real_frames[0]
 
-        # Real frames: drop them into their chronological slots, right after the start padding. 
+        # Real frames: drop them into their chronological slots, right after the start padding.
         if pad_before < self.n_obs_steps:
             num_real = min(self.n_obs_steps - pad_before, num_frames_to_read)
             insert_end = pad_before + num_real
@@ -651,7 +620,9 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
         assert gaussian_selection in ("subsample", "opacity_filter"), \
             f"invalid gaussian_selection: {gaussian_selection}"
 
-        gsplats_torch = torch.from_numpy(sample['gsplats']).float()   # (n_obs_steps, N, D)
+        # numpy-side fp16 -> fp32 cast: bit-identical to torch's .float(), but the copy keeps
+        # torch.from_numpy off the read-only memmap views the sampler returns
+        gsplats_torch = torch.from_numpy(sample['gsplats'].astype(np.float32))   # (n_obs_steps, N, D)
 
         # subsampling is done at the beginning for consistency between both representations
         # it especially benefits relative_ee_pose as subsequent transformations are only applied to self.num_gaussians (K)
@@ -673,8 +644,9 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
             # =====================================================
             # Absolute joint position mode
             # =====================================================
-            agent_proprio = torch.from_numpy(sample['joint_pos_proprio'])
-            action = torch.from_numpy(sample['joint_pos_action'])
+            # .copy(), since the sampler hands out read-only memmap views
+            agent_proprio = torch.from_numpy(sample['joint_pos_proprio'].copy())
+            action = torch.from_numpy(sample['joint_pos_action'].copy())
 
             obs_dict = {'agent_proprio': agent_proprio}
 
@@ -696,7 +668,7 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
             # Relative EE pose mode
             # All quantities expressed relative to the anchor ("current time") frame
             # =====================================================
-            
+
             tcp_pose_proprio = sample['tcp_pose_proprio'].astype(np.float32)   # (n_obs_steps, 7)
             tcp_pose_action = sample['tcp_pose_action'].astype(np.float32)     # (horizon, 8) = 7D pose + 1D gripper
             joint_pos_proprio = sample['joint_pos_proprio'].astype(np.float32)  # (n_obs_steps, 9)
@@ -742,18 +714,18 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
             # pos(3) + rot6d(6) + gripper(2) = 11D per obs step
             T_tcp_pose_proprio_to_base = pose7_to_mat_np(tcp_pose_proprio)   # (n_obs_steps, 4, 4)
             T_relative_tcp = T_anchor_base_to_tcp[None, :, :] @ T_tcp_pose_proprio_to_base   # (n_obs_steps, 4, 4)
-            rel_tcp_pose9d = mat_to_pose9d_np(T_relative_tcp)  # (n_obs_steps, 9) 
+            rel_tcp_pose9d = mat_to_pose9d_np(T_relative_tcp)  # (n_obs_steps, 9)
             gripper_pos = joint_pos_proprio[:, -2:]          # (n_obs_steps, 2), absolute gripper position
             agent_proprio_np = np.concatenate([rel_tcp_pose9d, gripper_pos], axis=-1)  # (n_obs_steps, 11)
             obs_dict['agent_proprio'] = torch.from_numpy(agent_proprio_np)
 
             # --- 3. Actions: relative EE pose + gripper ---
             # pos(3) + rot6d(6) + gripper(1) = 10D per action step
-            
+
             # Split tcp_pose_action into pose (7D) and gripper (1D)
             tcp_pose_action_7d = tcp_pose_action[:, :7]   # (horizon, 7)
             gripper_action = tcp_pose_action[:, 7:]     # (horizon, 1)
-            
+
             T_tcp_pose_action_to_base = pose7_to_mat_np(tcp_pose_action_7d)   # (horizon, 4, 4)
             T_rel_action = T_anchor_base_to_tcp[None, :, :] @ T_tcp_pose_action_to_base # (horizon, 4, 4)
             rel_action_pose9d = mat_to_pose9d_np(T_rel_action)  # (horizon, 9)
@@ -764,7 +736,8 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
 
         # A sample generated during get_normalizer does not contain actor_keys
         if hasattr(self, 'actor_keys') and len(self.actor_keys) > 0 and all(k in sample for k in self.actor_keys):
-            data['actor_poses'] = {k: torch.from_numpy(sample[k]) for k in self.actor_keys}
+            # .copy(), since the sampler hands out read-only memmap views
+            data['actor_poses'] = {k: torch.from_numpy(sample[k].copy()) for k in self.actor_keys}
 
         return data
 
@@ -773,24 +746,14 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
 
         buf_idx, local_idx = self._global_sample_to_local(idx)
         t_2 = time.time()
-
-        # Track dataset block switches
-        # if not hasattr(self, "_worker_current_buf"):
-        #     self._worker_current_buf = {}
-        # pid = os.getpid()
-        # last_buf = self._worker_current_buf.get(pid, -1)
-        # if buf_idx != last_buf:
-        #     print(f"[Worker {pid}] Switched to reading from dataset {buf_idx} (prev: {last_buf})")
-        #     self._worker_current_buf[pid] = buf_idx
-        # t_3 = time.time()
         t_3 = t_2
-        
+
         sample = self.samplers[buf_idx].sample_sequence(local_idx)
         t_4 = time.time()
-        
+
         raw_indices = self.samplers[buf_idx].indices[local_idx]
         t_5 = time.time()
-        
+
         # needed in relative_ee_pose for gripper state!
         sample['joint_pos_proprio'] = self._get_synced_obs_slice(raw_indices, self.joint_pos_proprio_arrays[buf_idx], name="joint_pos_proprio")
         if self.representation_space == "relative_ee_pose":
@@ -809,7 +772,7 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
                 f"  - Block Switch Tracking: {(t_3 - t_2) * 1000:.3f} ms\n"
                 f"  - Sequence Sampling:     {(t_4 - t_3) * 1000:.3f} ms\n"
                 f"  - Retrieve Indices:      {(t_5 - t_4) * 1000:.3f} ms\n"
-                f"  - Load Zarr Obs Slices:  {(t_6 - t_5) * 1000:.3f} ms\n"
+                f"  - Load Obs Slices:       {(t_6 - t_5) * 1000:.3f} ms\n"
                 f"  - Sample to Torch Data:  {(t_7 - t_6) * 1000:.3f} ms\n"
                 f"  - Total __getitem__:     {(t_7 - t_1) * 1000:.3f} ms"
             )
@@ -820,8 +783,7 @@ class WristCamGSManiskillDataset(MultiZarrDataset):
 if __name__ == "__main__":
     import hydra
     from torch.utils.data import DataLoader
-    import time
-    import tqdm
+    import tqdm as tqdm_module
     from diffusion_policy_3d.common.pytorch_util import dict_apply
     from diffusion_policy_3d.dataset.data_augmentations import GaussianCompose
     from omegaconf import OmegaConf
@@ -834,14 +796,17 @@ if __name__ == "__main__":
         config_name="wrist_cam_gsplat_dp3"
     )
     def main(cfg):
-        # configure dataset
+        # The task config targets the zarr dataset during the transition, so swap in this
+        # class and read the memmap directories from the CLI:
+        #   python maniskill_wrist_cam_gs_memmap_dataset.py \
+        #     +dataset_path=/path/to/parent_or_dataset_dir
+        dataset_cfg = OmegaConf.to_container(cfg.task.dataset, resolve=True)
+        del dataset_cfg['_target_'], dataset_cfg['zarr_path']
         dataset: BaseDataset
-        dataset = hydra.utils.instantiate(cfg.task.dataset)
-        assert isinstance(dataset, BaseDataset), f"dataset must be BaseDataset, got {type(dataset)}"
+        dataset = WristCamGSMemmapManiskillDataset(
+            dataset_path=cfg.dataset_path, **dataset_cfg)
         print(f"Dataset instantiated. Length: {len(dataset)}")
-        
-        # dataset_block_sampler = DatasetBlockSampler(dataset._cumulative_lengths)
-        # train_dataloader = DataLoader(dataset, sampler=dataset_block_sampler, **cfg.dataloader)
+
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         print("DataLoader instantiated.")
 
@@ -850,11 +815,11 @@ if __name__ == "__main__":
         # =========================================================
         print(f"\n--- Testing Normalizer ({dataset.representation_space}) ---")
         normalizer = dataset.get_normalizer()
-        
+
         # Grab one batch to test normalization
         batch = next(iter(train_dataloader))
         print("Got test batch. Normalizing...")
-        
+
         # The normalizer expects a dict with keys matching its params_dict
         test_dict = {
             'action': batch['action'],
@@ -862,9 +827,9 @@ if __name__ == "__main__":
         }
         if 'positions' in dataset.gs_params:
             test_dict['gs_positions'] = batch['obs']['gs_positions']
-            
+
         normalized_dict = normalizer.normalize(test_dict)
-        
+
         for k, v in normalized_dict.items():
             print(f"  {k}: shape {v.shape}, min={v.min().item():.3f}, max={v.max().item():.3f}")
         # =========================================================
@@ -872,7 +837,7 @@ if __name__ == "__main__":
         # Test loading for 3 epochs
         num_epochs = 3
         print(f"Testing batch loading for {num_epochs} epochs...")
-        
+
         device = torch.device(cfg.training.device)
 
         if 'train_data_augmentations' in cfg.task and cfg.task.train_data_augmentations is not None:
@@ -881,13 +846,13 @@ if __name__ == "__main__":
 
         for epoch in range(num_epochs):
             print(f"\n--- Epoch {epoch + 1}/{num_epochs} ---")
-            
-            with tqdm.tqdm(train_dataloader, desc=f"Training epoch {epoch}", 
+
+            with tqdm_module.tqdm(train_dataloader, desc=f"Training epoch {epoch}",
                     leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                 t_before_next_batch = time.time()
                 for batch_idx, batch in enumerate(tepoch):
                     t1 = time.time()
-                   
+
                     # device transfer
                     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                     t1_1 = time.time()
@@ -895,7 +860,7 @@ if __name__ == "__main__":
                     # augmentations
                     batch = train_data_augmentations(batch)
                     t1_2 = time.time()
-                    
+
                     print(f" batch generation time {t1-t_before_next_batch:.3f}")
                     print(f" device transfer time: {t1_1-t1:.3f}")
                     print(f" augmentations time: {t1_2-t1_1:.3f}")

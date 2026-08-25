@@ -78,11 +78,16 @@ dataset:
   _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_zarr_dataset.WristCamGSManiskillDataset
   # One entry per converted dataset
   zarr_path:
-    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_1_new_key_names_positions_surf_normals_opacities_active_gaussians_mask_semantics
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_1_positions_surf_normals_opacities_active_gaussians_mask_semantics
     
   representation_space: ${task.representation_space}
   min_opacity: ${task.min_opacity}
   num_gaussians: ${task.num_gaussians}
+  # relative_ee_pose percentile stats: histogram over anchor-relative positions.
+  # bin width = 2 * range / num_bins = 1.4e-6 m. Do NOT override per sweep -- the same
+  # estimator constants across all runs are what keeps normalizations comparable.
+  percentile_histogram_range: 3.0
+  percentile_histogram_num_bins: ${eval:'2 ** 22'}
 
 # train_data_augmentations / val_data_augmentations default to [] in maniskill_base.
 # If needed, override here with GPU augmentations from dataset/data_augmentations.py

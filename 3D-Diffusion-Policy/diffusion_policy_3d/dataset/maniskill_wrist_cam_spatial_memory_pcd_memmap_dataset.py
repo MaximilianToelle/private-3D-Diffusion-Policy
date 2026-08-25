@@ -1,11 +1,12 @@
-"""Dataset for the spatial_memory_pcd baseline.
+"""Dataset for the spatial_memory_pcd baseline, over the memmap dataset format.
 
-Loads the zarr(s) written by scripts/dataset/conversion/
-convert_wrist_cam_gsworld_to_spatial_memory_pcd.py, which stores each frame's FULL
-accumulated memory produced by the shared SpatialMemoryPcdSceneMapper, padded to a fixed
-row count and accompanied by num_valid_points, plus the proprio and action keys shared with
-the other converters. Several converted datasets are pooled through MultiZarrDataset, since
-conversion runs as a job array producing one zarr per recording.
+Loads the memmap dataset(s) written by scripts/dataset/conversion/
+convert_wrist_cam_gsworld_to_spatial_memory_pcd_memmap.py (or repacked from a zarr by
+repack_zarr_dataset_to_memmap.py), which store each frame's FULL accumulated memory
+produced by the shared SpatialMemoryPcdSceneMapper, padded to a fixed row count and
+accompanied by num_valid_points, plus the proprio and action keys shared with the other
+converters. Several converted datasets are pooled through MultiMemmapDataset, since
+conversion runs as a job array producing one dataset per recording.
 
 The dataset hands the padded memory over unchanged, together with num_valid_points. Reducing
 it to the num_points the policy consumes is the job of the PointCloudFPS augmentation
@@ -25,13 +26,13 @@ import numpy as np
 import torch
 
 from diffusion_policy_3d.dataset.base_dataset import BaseDataset
-from diffusion_policy_3d.dataset.multi_zarr_dataset import MultiZarrDataset
+from diffusion_policy_3d.dataset.multi_memmap_dataset import MultiMemmapDataset
 from diffusion_policy_3d.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 
 
-class WristCamSpatialMemoryPCDManiskillDataset(MultiZarrDataset):
+class WristCamSpatialMemoryPCDMemmapManiskillDataset(MultiMemmapDataset):
     def __init__(self,
-            zarr_path,
+            dataset_path,
             horizon=1,
             n_obs_steps=1,
             pad_before=0,
@@ -40,12 +41,11 @@ class WristCamSpatialMemoryPCDManiskillDataset(MultiZarrDataset):
             val_ratio=0.0,
             max_train_episodes=None,
             ):
-        # Opens one replay buffer and one sampler per zarr (loaded into RAM when it fits,
-        # read through raw memmap caches otherwise; point_cloud is (T, N, 3) f32), splits
-        # train/val globally over all of them and provides the global->local index mapping
-        # (dataset/multi_zarr_dataset.py).
+        # Opens one memmap-backed replay buffer and one sampler per dataset (point_cloud is
+        # (T, N, 3) f32, read through the OS page cache), splits train/val globally over all
+        # of them and provides the global->local index mapping (dataset/multi_memmap_dataset.py).
         super().__init__(
-            zarr_path=zarr_path,
+            dataset_path=dataset_path,
             horizon=horizon,
             n_obs_steps=n_obs_steps,
             pad_before=pad_before,
@@ -59,18 +59,17 @@ class WristCamSpatialMemoryPCDManiskillDataset(MultiZarrDataset):
         # env-runner builder asserts the stamp against the composed config: the recorded clouds
         # would come from different scene representations.
         self.scene_representation = None
-        for path, buf in zip(self.zarr_paths, self.replay_buffers):
-            meta = buf.root['meta']
-            attrs = meta if isinstance(meta, dict) else meta.attrs
+        for path, buf in zip(self.dataset_paths, self.replay_buffers):
+            attrs = buf.root['meta']
             assert 'scene_representation' in attrs, (
-                f"{path} lacks meta.attrs scene_representation -- reconvert it with the "
-                "current convert_wrist_cam_gsworld_to_spatial_memory_pcd.py.")
+                f"{path} lacks a scene_representation stamp -- reconvert it with the "
+                "current convert_wrist_cam_gsworld_to_spatial_memory_pcd_memmap.py.")
             if self.scene_representation is None:
                 self.scene_representation = attrs['scene_representation']
             assert attrs['scene_representation'] == self.scene_representation, (
                 f"{path} was converted with a different scene_representation than "
-                f"{self.zarr_paths[0]} -- mixing them in one training run is invalid.\n"
-                f"  {self.zarr_paths[0]}: {self.scene_representation}\n  {path}: "
+                f"{self.dataset_paths[0]} -- mixing them in one training run is invalid.\n"
+                f"  {self.dataset_paths[0]}: {self.scene_representation}\n  {path}: "
                 f"{attrs['scene_representation']}")
 
     def _sampler_keys(self):
@@ -82,11 +81,12 @@ class WristCamSpatialMemoryPCDManiskillDataset(MultiZarrDataset):
         reproduce dataset initial conditions for rollouts."""
         replay_buffer, start_idx, end_idx = self._episode_frame_range(global_episode_idx)
 
+        # np.array copies, since indexing a memmap returns read-only views of the file
         init_state = {
-            'actor_poses': {k: replay_buffer[k][start_idx] for k in self.actor_keys},
-            'agent_pos': replay_buffer['joint_pos_proprio'][start_idx],
+            'actor_poses': {k: np.array(replay_buffer[k][start_idx]) for k in self.actor_keys},
+            'agent_pos': np.array(replay_buffer['joint_pos_proprio'][start_idx]),
         }
-        expert_trajectory = replay_buffer['joint_pos_proprio'][start_idx:end_idx]
+        expert_trajectory = np.array(replay_buffer['joint_pos_proprio'][start_idx:end_idx])
         return init_state, expert_trajectory
 
     def get_normalizer(self, **kwargs):
@@ -165,19 +165,22 @@ class WristCamSpatialMemoryPCDManiskillDataset(MultiZarrDataset):
         buf_idx, local_idx = self._global_sample_to_local(idx)
         sample = self.samplers[buf_idx].sample_sequence(local_idx)
 
+        # .copy() where the sampler returned a slice VIEW of the read-only memmap:
+        # torch.from_numpy on a non-writable array is undefined behavior on write. astype
+        # already copies, so the casted keys need no extra one.
         data = {
             'obs': {
                 # policy only consumes the first n_obs_steps of the horizon window.
                 # The memory is passed on with its padding, since PointCloudFPS reduces it to
                 # num_points on the GPU and needs num_valid_points as the per-cloud length.
-                'point_cloud': torch.from_numpy(sample['point_cloud'][:self.n_obs_steps]),
+                'point_cloud': torch.from_numpy(sample['point_cloud'][:self.n_obs_steps].copy()),
                 'num_valid_points': torch.from_numpy(
                     sample['num_valid_points'][:self.n_obs_steps].astype(np.int64)),
                 'agent_proprio': torch.from_numpy(sample['joint_pos_proprio'][:self.n_obs_steps].astype(np.float32)),
             },
             'action': torch.from_numpy(sample['joint_pos_action'].astype(np.float32)),
             # only used for reproducing rollout init states, not for learning
-            'actor_poses': {k: torch.from_numpy(sample[k]) for k in self.actor_keys},
+            'actor_poses': {k: torch.from_numpy(sample[k].copy()) for k in self.actor_keys},
         }
         return data
 
@@ -201,9 +204,15 @@ if __name__ == "__main__":
         config_name="wrist_cam_spatial_memory_dp3"
     )
     def main(cfg):
+        # The task config targets the zarr dataset during the transition, so swap in this
+        # class and read the memmap directories from the CLI:
+        #   python maniskill_wrist_cam_spatial_memory_pcd_memmap_dataset.py \
+        #     +dataset_path=/path/to/parent_or_dataset_dir
+        dataset_cfg = OmegaConf.to_container(cfg.task.dataset, resolve=True)
+        del dataset_cfg['_target_'], dataset_cfg['zarr_path']
         dataset: BaseDataset
-        dataset = hydra.utils.instantiate(cfg.task.dataset)
-        assert isinstance(dataset, BaseDataset), f"dataset must be BaseDataset, got {type(dataset)}"
+        dataset = WristCamSpatialMemoryPCDMemmapManiskillDataset(
+            dataset_path=cfg.dataset_path, **dataset_cfg)
         print(f"Dataset instantiated. Length: {len(dataset)}")
 
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
