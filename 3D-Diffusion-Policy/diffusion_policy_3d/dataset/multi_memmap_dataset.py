@@ -32,7 +32,7 @@ import numpy as np
 
 from diffusion_policy_3d.common.replay_buffer import ReplayBuffer
 from diffusion_policy_3d.common.sampler import (
-    SequenceSampler, get_val_mask, downsample_mask)
+    SequenceSampler, train_episode_mask)
 from diffusion_policy_3d.dataset.base_dataset import BaseDataset
 
 META_FILENAME = 'meta.json'
@@ -160,8 +160,7 @@ class MultiMemmapDataset(BaseDataset):
         pad_before=0,
         pad_after=0,
         seed=42,
-        val_ratio=0.0,
-        max_train_episodes=None,
+        num_train_episodes=None,
     ):
         super().__init__()
         self.n_obs_steps = n_obs_steps
@@ -193,23 +192,15 @@ class MultiMemmapDataset(BaseDataset):
         self.total_episodes = sum(self.episode_counts)
         self._episode_cumcounts = np.cumsum(self.episode_counts)
 
-        global_val_mask = get_val_mask(
+        # EVERY episode that is not trained on is validation -- training on one trajectory
+        # validates on all others, and num_train_episodes=None trains on everything with no
+        # validation. This keeps the validation loss and the validation rollouts on the SAME
+        # episodes: both read from this mask, the loss through per_buffer_val_masks and the
+        # env runner through the global mask that get_validation_dataset swaps in.
+        global_train_mask = train_episode_mask(
             n_episodes=self.total_episodes,
-            val_ratio=val_ratio,
+            num_train_episodes=num_train_episodes,
             seed=seed)
-
-        global_train_mask = ~global_val_mask
-        global_train_mask = downsample_mask(
-            mask=global_train_mask,
-            max_n=max_train_episodes,
-            seed=seed)
-
-        # EVERY episode that is not trained on is validation, so val_ratio only decides the
-        # split when training uses all remaining episodes, while max_train_episodes hands the
-        # rest to validation -- training on one trajectory validates on all others. It also
-        # keeps the validation loss and the validation rollouts on the SAME episodes: both read
-        # from this mask, the loss through per_buffer_val_masks and the env runner through the
-        # global mask that get_validation_dataset swaps in.
         global_val_mask = ~global_train_mask
         self.global_val_mask = global_val_mask
 

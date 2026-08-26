@@ -107,7 +107,7 @@ class TrainDP3Workspace:
             RUN_ROLLOUT = True
             verbose = True
             cfg.task.env_runner.eval_episodes = 2
-            cfg.task.dataset.max_train_episodes = 5
+            cfg.task.dataset.num_train_episodes = 5
         else:
             RUN_ROLLOUT = True
             verbose = False
@@ -386,7 +386,7 @@ class TrainDP3Workspace:
             if ((self.epoch + 1) % cfg.training.rollout_every) == 0 and RUN_ROLLOUT and env_runner is not None:
                 t3 = time.time()
                 runner_log_train = env_runner.run(policy, dataset=dataset, prefix=f"train_epoch_{self.epoch}")
-                # Nothing is held out when val_ratio=0 and max_train_episodes is unset.
+                # Nothing is held out when num_train_episodes is unset (train on everything).
                 runner_log_val = ({} if len(val_dataset) == 0 else
                     env_runner.run(policy, dataset=val_dataset, prefix=f"val_epoch_{self.epoch}"))
                 t4 = time.time()
@@ -517,7 +517,7 @@ class TrainDP3Workspace:
                 if isinstance(value, float):
                     cprint(f"{key}: {value:.4f}", 'magenta')
 
-            # Nothing is held out when val_ratio=0 and max_train_episodes is unset.
+            # Nothing is held out when num_train_episodes is unset (train on everything).
             runner_log = ({} if len(val_dataset) == 0 else env_runner.run(
                 policy, prefix=f"seperate_eval_val_epoch_{self.epoch}", dataset=val_dataset))
             cprint(f"---------------- Eval Results - Validation Dataset --------------", 'magenta')

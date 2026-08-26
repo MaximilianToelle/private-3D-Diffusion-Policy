@@ -40,15 +40,12 @@ dataset:
   seed: 42
   # Validation is ALWAYS every episode that is not trained on, for the validation loss and the
   # validation rollouts alike, so the two are never measured on different episodes.
-  #   max_train_episodes: null -> train on everything but the val_ratio share, validate on that
-  #     share. Use this when the dataset size is unknown, e.g. when pooling several zarrs.
-  #   max_train_episodes: K    -> train on K episodes, validate on ALL others; val_ratio then
-  #     only shifts which episodes are eligible for training and can stay 0. Single-trajectory
-  #     training therefore validates against the whole rest of the dataset.
-  # val_ratio: 0 with max_train_episodes: null holds nothing out: no validation loss and no
-  # validation rollout.
-  val_ratio: 0.1
-  max_train_episodes: null
+  #   num_train_episodes: K    -> train on K seeded-random episodes, validate on ALL others.
+  #     Single-trajectory training therefore validates against the whole rest of the dataset.
+  #     Asking for more episodes than the dataset holds is an error, never a silent cap.
+  #   num_train_episodes: null -> train on every episode: no validation loss, no validation
+  #     rollout.
+  num_train_episodes: null
 
 # Default: no GPU data augmentations. Leaves override when they need them.
 train_data_augmentations: []

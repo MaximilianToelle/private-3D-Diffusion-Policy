@@ -38,8 +38,7 @@ class WristCamSpatialMemoryPCDMemmapManiskillDataset(MultiMemmapDataset):
             pad_before=0,
             pad_after=0,
             seed=42,
-            val_ratio=0.0,
-            max_train_episodes=None,
+            num_train_episodes=None,
             ):
         # Opens one memmap-backed replay buffer and one sampler per dataset (point_cloud is
         # (T, N, 3) f32, read through the OS page cache), splits train/val globally over all
@@ -51,8 +50,7 @@ class WristCamSpatialMemoryPCDMemmapManiskillDataset(MultiMemmapDataset):
             pad_before=pad_before,
             pad_after=pad_after,
             seed=seed,
-            val_ratio=val_ratio,
-            max_train_episodes=max_train_episodes,
+            num_train_episodes=num_train_episodes,
         )
 
         # Datasets converted with different mapper params must not be mixed, for the reason the

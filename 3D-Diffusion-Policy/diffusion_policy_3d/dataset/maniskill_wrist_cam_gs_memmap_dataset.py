@@ -32,8 +32,7 @@ class WristCamGSMemmapManiskillDataset(MultiMemmapDataset):
         pad_before=0,
         pad_after=0,
         seed=42,
-        val_ratio=0.0,
-        max_train_episodes=None,
+        num_train_episodes=None,
         representation_space="abs_joint_pos",  # abs_joint_pos | relative_ee_pose
         min_opacity=0.,       # Gaussians below this opacity are pruned during subsampling / normalization
         num_gaussians=1024,   # K: number of Gaussians kept per sample after CPU subsampling
@@ -58,8 +57,7 @@ class WristCamGSMemmapManiskillDataset(MultiMemmapDataset):
             pad_before=pad_before,
             pad_after=pad_after,
             seed=seed,
-            val_ratio=val_ratio,
-            max_train_episodes=max_train_episodes,
+            num_train_episodes=num_train_episodes,
         )
 
         # Cached array handles per buffer, read by _get_synced_obs_slice.
