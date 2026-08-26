@@ -74,8 +74,7 @@ class ManiSkillRunner(BaseRunner):
         sim_freq: int = 100,
         control_freq: int = 20,    # match data collection -> 5 physics substeps!
         device: str = "cuda:0",
-        depth_mode: str = None,     # None (gt rasterizer) | sapien_stereo | da3 | fast_foundation_stereo
-        da3_model_id: str = "depth-anything/DA3NESTED-GIANT-LARGE-1.1",
+        depth_mode: str = None,     # None (gt rasterizer) | sapien_stereo | fast_foundation_stereo
     ):
         super().__init__(output_dir)
         
@@ -105,7 +104,6 @@ class ManiSkillRunner(BaseRunner):
             sim_backend="gpu" if "cuda" in device else "cpu",
             sim_config=dict(sim_freq=sim_freq, control_freq=control_freq),
             depth_mode=depth_mode,
-            da3_model_id=da3_model_id,
         )
 
         # `maniskill_env_obs_wrapper_builder` is a functools.partial from hydra with
