@@ -26,11 +26,11 @@ policy:
   
   diffusion_step_embed_dim: 128
   down_dims:
-  - 512   # 128, 512
-  - 1024  # 256, 1024
-  - 2048  # 512, 2048
+  - 256   # 128, 512
+  - 512  # 256, 1024
+  - 1024  # 512, 2048
 
-  encoder_output_dim: 64
+  encoder_output_dim: 128
   horizon: ${horizon}
   kernel_size: 5
   n_action_steps: ${n_action_steps}
@@ -80,7 +80,7 @@ val_dataloader:
 
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 3.0e-4 # 1.0e-4
+  lr: 1.0e-4
   betas: [0.95, 0.999]
   eps: 1.0e-8
   weight_decay: 1.0e-6
@@ -90,11 +90,11 @@ training:
   seed: 42
   debug: False
   resume: True
-  lr_scheduler: cosine       # constant, constant_with_warmup, cosine
+  lr_scheduler: constant       # constant, constant_with_warmup, cosine
   lr_warmup_steps: 3600      # 1% of training -> 90 traj, 180 gradient steps per epoch, 2000 epochs
   num_epochs: 2000     
   gradient_accumulate_every: 1
-  grad_clip_norm: null         # max_norm for clip_grad_norm_; set to null to disable gradient clipping
+  grad_clip_norm: 1.0         # max_norm for clip_grad_norm_; set to null to disable gradient clipping
   use_ema: True
   use_torch_compile: True
   torch_compile_mode: max-autotune        # training compile mode
