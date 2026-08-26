@@ -30,7 +30,8 @@ env_runner:
   control_freq: 20
   tqdm_interval_sec: 5.0
   device: cuda:0
-  realistic_depth: false
+  depth_mode: null              # null (gt rasterizer) | sapien_stereo | da3 | fast_foundation_stereo
+  da3_model_id: depth-anything/DA3NESTED-GIANT-LARGE-1.1
 
 dataset:
   horizon: ${horizon}

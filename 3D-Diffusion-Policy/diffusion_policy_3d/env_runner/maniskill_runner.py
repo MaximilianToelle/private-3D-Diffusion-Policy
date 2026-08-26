@@ -74,7 +74,8 @@ class ManiSkillRunner(BaseRunner):
         sim_freq: int = 100,
         control_freq: int = 20,    # match data collection -> 5 physics substeps!
         device: str = "cuda:0",
-        realistic_depth: bool = False,
+        depth_mode: str = None,     # None (gt rasterizer) | sapien_stereo | da3 | fast_foundation_stereo
+        da3_model_id: str = "depth-anything/DA3NESTED-GIANT-LARGE-1.1",
     ):
         super().__init__(output_dir)
         
@@ -92,8 +93,8 @@ class ManiSkillRunner(BaseRunner):
         self.callbacks: List[EvalCallback] = list(callbacks) if callbacks is not None else []
         self.obs_key_aliases: Dict[str, str] = dict(obs_key_aliases) if obs_key_aliases is not None else {}
 
-        if realistic_depth:
-            assert n_envs == 1, "realistic depth only supports a single environment"
+        if depth_mode is not None:
+            assert n_envs == 1, "swapped depth backends only support a single environment"
         base_env = gymnasium.make(
             task_name,
             robot_uids=robot_uids,
@@ -103,7 +104,8 @@ class ManiSkillRunner(BaseRunner):
             max_episode_steps=max_steps,
             sim_backend="gpu" if "cuda" in device else "cpu",
             sim_config=dict(sim_freq=sim_freq, control_freq=control_freq),
-            realistic_depth=realistic_depth,
+            depth_mode=depth_mode,
+            da3_model_id=da3_model_id,
         )
 
         # `maniskill_env_obs_wrapper_builder` is a functools.partial from hydra with
