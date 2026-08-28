@@ -30,7 +30,7 @@ env_runner:
   control_freq: 20
   tqdm_interval_sec: 5.0
   device: cuda:0
-  depth_mode: null              # null (gt rasterizer) | sapien_stereo | fast_foundation_stereo
+  depth_mode: null              # null (gt rasterizer) | fast_foundation_stereo
 
 dataset:
   horizon: ${horizon}

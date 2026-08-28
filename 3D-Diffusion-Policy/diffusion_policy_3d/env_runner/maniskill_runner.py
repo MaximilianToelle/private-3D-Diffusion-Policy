@@ -74,7 +74,7 @@ class ManiSkillRunner(BaseRunner):
         sim_freq: int = 100,
         control_freq: int = 20,    # match data collection -> 5 physics substeps!
         device: str = "cuda:0",
-        depth_mode: str = None,     # None (gt rasterizer) | sapien_stereo | fast_foundation_stereo
+        depth_mode: str = None,     # None (gt rasterizer) | fast_foundation_stereo
     ):
         super().__init__(output_dir)
         
