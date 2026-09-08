@@ -1,0 +1,131 @@
+defaults:
+  - task: maniskill_wrist_cam_nvblox_stack
+  - scene_representation: nvblox   # chosen mapper params; single source shared with the dataset converter
+  - _self_
+
+# mindmap baseline (vendored DiffuserActor on nvblox feature clouds) in the DP3
+# harness. Standalone config on purpose: deriving from base_dp3 would merge the
+# DP3 policy block (down_dims, noise_scheduler, ...) into ours and break
+# hydra.instantiate. Training hyperparameters replicate mindmap's TrainingAppArgs
+# (AdamW lr 1e-4 / wd 5e-4, batch 32, no EMA); deviations are commented.
+
+name: train_mindmap_dp3
+task_name: ${task.name}
+exp_name: "debug"
+
+policy:
+  _target_: diffusion_policy_3d.policy.mindmap_dp3.MindmapDP3
+  # workspace_bounds are data-derived: set from the dataset at training start
+  # (set_workspace_bounds) and persisted in checkpoints, like the normalizer.
+  feature_type: ${scene_representation.feature_type}   # sizes the input projection; single source
+  embedding_dim: 120   # DiffuserActor's internal width (policy hyperparameter, NOT the input feature dim C)
+  fps_subsampling_factor: 5
+  use_fps: 1
+  rotation_parametrization: 6D_from_query
+  quaternion_format: wxyz
+  diffusion_timesteps: 100
+  num_history: 3
+  prediction_horizon: 1        # keypose mode: predict the next keypose
+  pos_loss_weight: 30.0
+  rot_loss_weight: 10.0
+  gripper_loss_weight: 1.0
+  encoder_dropout: 0.0
+  diffusion_dropout: 0.0
+  predictor_dropout: 0.0
+  # closed-loop execution (mindmap CLOSED_LOOP_WAIT, evaluated every control step)
+  gripper_open_action: 1.0     # pd_ee_pos_quat gripper command range [-1, 1]
+  gripper_close_action: -1.0
+  max_num_steps_to_goal: 40            # their ClosedLoopArgs default
+  goal_reached_threshold_m: 0.001      # ARM_GO_TO_NEXT_GOAL_THRESHOLD_M
+  goal_reached_threshold_deg: 1.0      # ARM_GO_TO_NEXT_GOAL_THRESHOLD_DEG
+  goal_reached_threshold_gripper_diff: 0.2
+  gripper_command_delay_steps: 10      # ArmEmbodimentOnlineEstimator default
+
+ema:
+  _target_: diffusion_policy_3d.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 32               # mindmap default
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+  prefetch_factor: 4
+  drop_last: True
+
+val_dataloader:
+  batch_size: 32
+  num_workers: 4
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+  prefetch_factor: 4
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4                   # mindmap initial_learning_rate
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 5.0e-4         # mindmap wd; bias/LayerNorm exclusion via
+                               # MindmapDP3.get_optimizer_param_groups
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: True
+  lr_scheduler: linear_to_end_factor   # mindmap: LinearLR to 0.5x over 75% of steps
+  lr_start_factor: 1.0
+  lr_end_factor: 0.5                   # learning_rate_end_factor
+  lr_convergence_percentage: 0.75      # learning_rate_convergence_percentage
+  lr_warmup_steps: 0
+  num_epochs: 870                      # ~100k steps at 115 steps/epoch = mindmap train_iters
+  gradient_accumulate_every: 1
+  grad_clip_norm: null
+  use_ema: False               # mindmap trains without EMA
+  use_torch_compile: False     # DiffuserActor's FPS loop traces poorly
+  rollout_every: 100000        # no env_runner yet (offline milestone)
+  checkpoint_every: 50
+  val_every: 10
+  sample_every: 10
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+logging:
+  group: ${exp_name}
+  id: null
+  mode: offline                # flip to online once runs are real
+  name: "${name}-${task.name}-${training.seed}"
+  project: dp3
+  resume: true
+  tags:
+  - mindmap_baseline
+
+checkpoint:
+  save_ckpt: True
+  topk:
+    monitor_key: validation_loss
+    mode: min
+    k: 1
+    format_str: 'epoch={epoch:04d}-validation_loss={validation_loss:.4f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}

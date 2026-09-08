@@ -1,0 +1,42 @@
+# Single source of truth for the nvblox scene representation (mindmap baseline).
+#
+# The dataset converter (scripts/dataset/conversion/convert_wrist_cam_gsworld_to_nvblox_dp3.py)
+# loads THIS file to build the mapper and stamps the effective values into the
+# zarr (meta.attrs["scene_representation"]). At training/eval the env-runner
+# builder composes THIS file (via the mindmap_dp3 defaults list) and asserts it
+# equals the stamp -- the dataset was recorded with these values (e.g. voxel
+# size), so evaluating with different ones would be silently invalid. Editing
+# this file after converting therefore fails loudly: reconvert or revert.
+#
+# NOT here (data-derived, live in the dataset):
+#   workspace_bounds  -> calibrated via the converter's --print_bounds, stored as zarr attr
+#   embedding_dim (C) -> consequence of feature_type's extractor, read from vertex_features shape
+
+feature_type: radio_v25_b   # feature-extractor model; its output dim C is recorded in the data
+num_vertices: 2048          # what the policy consumes, sampled per dataset access / live obs
+# The zarr stores a SUPERSET of num_vertices per frame and the dataset samples
+# down to num_vertices fresh on every access -- mindmap's VertexSampler-as-
+# dataloader-transform, which their published pipeline relies on for epoch-to-
+# epoch subset variation. Upstream stores the full variable-size mesh; zarr
+# needs fixed rows, so this picks the superset size. Sweet spot 4096: the full
+# 1cm mesh of this tabletop scene is ~4-5k vertices on typical frames (~10k
+# worst case), so conversion drops little, at 2x the disk/RAM of storing 2048
+# (upstream-full would be ~5x). Uniform 2048-of-4096-of-mesh == uniform
+# 2048-of-mesh, so live eval (mapper samples num_vertices directly) sees
+# exactly the training distribution.
+num_stored_vertices: 4096
+vertex_sampling_method: random_without_replacement
+
+# NvbloxSceneMapperConfig fields (all of them -- the dataclass has no defaults)
+mapper_config:
+  voxel_size_m: 0.01
+  tsdf_decay_factor: 0.98
+  projective_integrator_max_integration_distance_m: 5.0
+  projective_appearance_integrator_measurement_weight: 1.0
+  min_integration_distance_m: 0.05
+  use_dynamic_mask: true
+  upscaled_feature_image_size: [512, 512]
+  feature_mask_border_percent: 5
+  static_mask_erosion_iterations: 17
+  dynamic_mask_erosion_iterations: 3
+  valid_depth_mask_erosion_iterations: 20

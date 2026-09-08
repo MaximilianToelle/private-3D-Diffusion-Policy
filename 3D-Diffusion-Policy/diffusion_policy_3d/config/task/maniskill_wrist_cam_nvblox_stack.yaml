@@ -1,0 +1,71 @@
+name: maniskill_wrist_cam_nvblox_stack
+
+# Task layer for the mindmap baseline on the wrist-cam stack task.
+#
+# No perception params here: chosen mapper params live in
+# config/scene_representation/nvblox.yaml (composed via the mindmap_dp3 defaults
+# list), data-derived values (workspace_bounds, embedding_dim) live in the
+# dataset zarr. The policy's normalization bounds are set from the dataset
+# at training start and persist in checkpoints (like the normalizer).
+
+# env_runner stays null by default: instantiating it constructs the nvblox scene
+# mapper (nvblox_torch + RADIO), unavailable on the host. When running where
+# nvblox is available, enable rollouts with:
+#   task.env_runner='${task.env_runner_nvblox}'
+# For plumbing tests without nvblox, additionally override:
+#   task.env_runner_nvblox.maniskill_env_obs_wrapper_builder.use_mock_scene_mapper=true
+env_runner: null
+
+env_runner_nvblox:
+  _target_: diffusion_policy_3d.env_runner.maniskill_runner.ManiSkillRunner
+  task_name: StackFr3WristCamEnv-v1
+  representation_space: abs_ee_pose          # policy outputs absolute pd_ee_pos_quat targets
+  agent_proprio_dim: 9                       # tcp pos3 + quat4 + jaw positions2
+  n_obs_steps: 1                             # the nvblox map itself carries the history
+  n_action_steps: 1            # CLOSED_LOOP_WAIT: policy decides per step
+  eval_episodes: 10
+  robot_uids: fr3_umi_wrist435_modified
+  obs_mode: rgb+depth+segmentation
+  n_envs: 1
+  max_steps: 400               # same episode budget as the gsplat task (comparability)
+  sim_freq: 100
+  control_freq: 20
+  tqdm_interval_sec: 5.0
+  device: cuda:0
+  maniskill_env_obs_wrapper_builder:
+    _target_: diffusion_policy_3d.env_runner.maniskill_env_obs_wrapper_builder.wrist_cam_nvblox_reconstruction
+    _partial_: true
+    representation_space: abs_ee_pose
+    agent_proprio_dim: 9
+    n_obs_steps: 1
+    n_action_steps: 1
+    cam_name: wrist_cam
+    # chosen mapper params (asserted against the dataset's stamped record) +
+    # the dataset the data-derived values are read from
+    scene_representation: ${scene_representation}
+    zarr_path: ${task.dataset.zarr_path}
+    use_mock_scene_mapper: false
+  callbacks: []
+
+dataset:
+  _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_nvblox_zarr_dataset.WristCamNvbloxManiskillDataset
+  zarr_path: /home/max/projects/gsplat_policy/datasets/nvblox_mindmap/stack_wrist_cam_20
+  num_history: ${policy.num_history}
+  prediction_horizon: ${policy.prediction_horizon}
+  extra_keyposes_around_grasp_events: [5]      # mindmap CUBE_STACKING default
+  keypose_detection_mode: HIGHEST_Z_BETWEEN_GRASP
+  # load-time vertex sampling: stored superset -> num_vertices per access
+  num_vertices: ${scene_representation.num_vertices}
+  vertex_sampling_method: ${scene_representation.vertex_sampling_method}
+  # mindmap's GeometryAugmentor (train split only): ONE random SE(3) per sample
+  # applied to cloud + gripper history + gt keyposes together. Ranges are their
+  # CLI defaults (xy shift +-0.1m, world-frame yaw +-90deg about the origin);
+  # upstream ships apply_random_transforms=0 -- an opt-in flag we enable.
+  apply_random_transforms: true
+  random_translation_range_m: [[-0.1, -0.1, 0.0], [0.1, 0.1, 0.0]]
+  random_rpy_range_deg: [[0.0, 0.0, -90.0], [0.0, 0.0, 90.0]]
+  seed: 42
+  num_train_episodes: null     # null: train on all episodes (training.debug sets 5)
+
+train_data_augmentations: []
+val_data_augmentations: []
