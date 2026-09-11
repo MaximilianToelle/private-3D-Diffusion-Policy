@@ -48,12 +48,12 @@ dynagslam:
   xyz_factor: [1, 1, 0.1]
   init_opacity: 0.99
   scale_factor: 1.0
-  max_radius: 0.05
+  max_radius: 0.002
   min_radius: 0.001
   L: 2
 
   # map preprocess
-  min_depth: 0.1
+  min_depth: 0.05
   max_depth: 5.0
   depth_filter: False
   invalid_confidence_thresh: 0.2

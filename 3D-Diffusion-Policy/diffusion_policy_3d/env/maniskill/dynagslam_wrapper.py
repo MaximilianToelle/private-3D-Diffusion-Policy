@@ -272,6 +272,13 @@ class DynaGSLAMWrapper(gym.Env):
         # and computes world-space vertex / normal maps — no ICP / ORB needed.
         self._tracker_preprocessor.tracking(frame, frame_map, seg_mask, None)
 
+
+        #added framemap to include now the segmentation for each pixel
+        frame_map["object_id_map"] = (
+            obs["sensor_data"][self.cam_name]["segmentation"][0, :, :, 0]
+            .to(device=frame_map["vertex_map_w"].device, dtype=torch.long)
+        )
+
         # tracking() populates the world-space geometry entries.
         d = frame_map["depth_map"]
         v = frame_map["vertex_map_w"]
@@ -565,7 +572,7 @@ class DynaGSLAMWrapper(gym.Env):
         if done:
             #here ther is one global otimization step at the end of the episode , here only thr last keyframe is selected for optimization
             final_optimization_params = copy.deepcopy(self.optimization_params)
-            self.gaussian_map.global_optimization(final_optimization_params,select_keyframe_num=1)
+            self.gaussian_map.global_optimization(final_optimization_params,select_keyframe_num=-1)
 
         obs_dict = self._build_obs_dict(raw_obs, force_resample=False)
         return obs_dict, float(reward), done, info
