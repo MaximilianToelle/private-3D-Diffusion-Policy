@@ -2,6 +2,10 @@ import torch
 from pytorch3d.ops import sample_farthest_points, ball_query
 from gsworld.constants import fr3_gs_semantics
 
+from diffusion_policy_3d.baseline_scene_integration.perception_utils import (
+    farthest_point_downsample,
+)
+
 
 class GaussianCompose:
     """Composes several transforms together sequentially."""
@@ -18,6 +22,12 @@ class GaussianFPS:
     """
     Standard Farthest Point Sampling on the GPU.
     Used for evaluation and baseline models to reduce the number of Gaussians.
+
+    A Gaussian is a persistent entity that moves through space over the horizon, so row i of the
+    observation holds the same Gaussian at every timestep. Sampling therefore runs once, on the
+    t=0 positions, and the resulting indices are gathered from all timesteps and features. This
+    keeps each sampled Gaussian's own trajectory intact, whereas sampling per timestep would
+    hand the policy a different set of Gaussians at every step.
     """
     def __init__(self, num_samples=1024, random_start_point=False):
         self.num_samples = num_samples
@@ -54,6 +64,42 @@ class GaussianFPS:
             # Subsample to final target size
             obs[key] = torch.gather(tensor, dim=2, index=gather_idx).to(torch.float32)
             
+        return batch
+
+
+class PointCloudFPS:
+    """
+    Farthest Point Sampling of a padded point cloud on the GPU, for the spatial_memory_pcd baseline.
+
+    The dataset hands over the full accumulated memory of every observation step, padded to a
+    fixed row count, together with num_valid_points.
+
+    The sampling itself is shared by every point-based representation and lives in
+    baseline_scene_integration/perception_utils.py, where the observation wrappers take it from
+    as well. This class contributes only what is specific to training: unpacking the observation
+    dict, batching the call, and the random_start_point that lets training see a different subset
+    of the same memory in every epoch while validation keeps one fixed subset.
+
+    Unlike GaussianFPS, every (batch, time) cloud is sampled independently, which comes for free by
+    flattening both dimensions into the batch dimension of a single pytorch3d call.
+    """
+    def __init__(self, num_points=1024, random_start_point=True):
+        self.num_points = num_points
+        self.random_start_point = random_start_point
+
+    def __call__(self, batch):
+        obs = batch['obs']
+        point_cloud = obs['point_cloud']                                # (B, T, num_stored_points, 3)
+        num_valid_points = obs.pop('num_valid_points')                  # (B, T), not needed afterwards
+        B, T, num_stored_points, _ = point_cloud.shape
+
+        sampled = farthest_point_downsample(
+            point_cloud.reshape(B * T, num_stored_points, 3),
+            self.num_points,
+            lengths=num_valid_points.reshape(B * T),                    # excludes the padding rows
+            random_start_point=self.random_start_point,
+        )
+        obs['point_cloud'] = sampled.view(B, T, self.num_points, 3)
         return batch
 
 

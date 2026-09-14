@@ -173,6 +173,44 @@ class SingleFieldLinearNormalizer(DictOfTensorMixin):
         }
         return cls.create_manual(scale, offset, input_stats_dict)
 
+    @classmethod
+    def create_center_radius(cls, pos_min, pos_max, input_stats_dict=None):
+        """Aspect-ratio-preserving position normalizer, shared by every baseline: ONE radius
+        scales all axes, so the scene keeps its true proportions and only the largest axis
+        reaches the [-1, 1] boundary. input_stats_dict defaults to the synthetic
+        center/radius stats; callers with real measured stats pass them instead."""
+        geometric_center = (pos_max + pos_min) / 2.0
+        max_radius = torch.clamp((pos_max - pos_min).max() / 2.0, min=1e-4)
+        if input_stats_dict is None:
+            input_stats_dict = {
+                'min': geometric_center - max_radius, 'max': geometric_center + max_radius,
+                'mean': geometric_center, 'std': pos_max - pos_min,
+            }
+        return cls.create_manual(
+            scale=torch.ones_like(geometric_center) / max_radius,
+            offset=-geometric_center / max_radius,
+            input_stats_dict=input_stats_dict)
+
+    @classmethod
+    def create_per_dof_min_max(cls, values_min, values_max, num_identity_dims):
+        """Per-DOF min/max normalizer for action/proprio, shared by every baseline: each DOF
+        has its own physical range. The last num_identity_dims dims (gripper, already in
+        [-1, 1]) get identity normalization."""
+        assert num_identity_dims >= 1, "num_identity_dims=0 would slice [-0:] = ALL dims"
+        values_min = values_min.clone()
+        values_max = values_max.clone()
+        values_min[-num_identity_dims:] = -1.0
+        values_max[-num_identity_dims:] = 1.0
+
+        scale = torch.clamp(values_max - values_min, min=1e-4) / 2.0
+        offset = -(values_max + values_min) / 2.0 / scale
+        return cls.create_manual(
+            scale=1.0 / scale, offset=offset,
+            input_stats_dict={
+                'min': values_min, 'max': values_max,
+                'mean': (values_max + values_min) / 2.0, 'std': scale
+            })
+
     def normalize(self, x: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
         return _normalize(x, self.params_dict, forward=True)
 
@@ -244,6 +282,13 @@ class PerTimestepLinearNormalizer(DictOfTensorMixin):
         denom = torch.clamp(p98 - p02, min=1e-6)
         scale = (2.0 / denom)           # (T, D)
         offset = -scale * p02 - 1.0     # (T, D)
+
+        # Slots whose span is below the data resolution (fp16 ~1e-4 m) are constant by
+        # construction (e.g. the anchor-step relative pose): identity instead of noise
+        # amplification, following UMI's ignore_dim handling of constant dims.
+        degenerate = (p98 - p02) < 1e-4
+        scale[degenerate] = 1.0
+        offset[degenerate] = 0.0
 
         params_dict = nn.ParameterDict({
             'scale': scale,                     # (T, D)

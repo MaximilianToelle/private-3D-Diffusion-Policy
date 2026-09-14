@@ -1,29 +1,95 @@
 defaults:
-  - maniskill_gs_stack  
-  - _self_              
+  - maniskill_wrist_cam_stack
+  - _self_
 
 name: maniskill_wrist_cam_gs_stack
 
+num_gaussians: 1024
+min_opacity: 0.98
+
+# gets merged with agent_proprio / action entries defined in maniskill_base.
+shape_meta: &shape_meta
+  obs:
+    gs_positions:
+      shape:
+        - ${task.num_gaussians}
+        - 3
+      type: spatial
+    point_cloud:            # aliased to gs_positions at eval (obs_key_aliases)
+      shape:
+        - ${task.num_gaussians}
+        - 3
+      type: spatial
+    gs_rotations_9d:
+      shape:
+        - ${task.num_gaussians}
+        - 9
+      type: spatial
+    gs_surface_normals:
+      shape:
+        - ${task.num_gaussians}
+        - 3
+      type: spatial
+    gs_log_scales:
+      shape:
+        - ${task.num_gaussians}
+        - 3
+      type: spatial
+    gs_opacities:
+      shape:
+        - ${task.num_gaussians}
+        - 1
+      type: spatial
+    gs_rgb:
+      shape:
+        - ${task.num_gaussians}
+        - 3
+      type: spatial
+
 env_runner:
-  _target_: diffusion_policy_3d.env_runner.maniskill_wrist_cam_gs_runner.WristCamGSManiSkillRunner
-  task_name: StackFr3WristCamSimpleEnv-v1
+  # For running pcd baseline on Gaussian means
+  obs_key_aliases:
+    point_cloud: gs_positions
+
+  # Builds the perception-head wrappers; the env_runner appends shared wrappers
+  # Add all perception-specific params, env_runner injects base_env and device
+  maniskill_env_obs_wrapper_builder:
+    _target_: diffusion_policy_3d.env_runner.maniskill_env_obs_wrapper_builder.wrist_cam_online_gaussian_splatting
+    _partial_: true
+    representation_space: ${task.representation_space}
+    agent_proprio_dim: ${task.shape_meta.obs.agent_proprio.shape[0]}
+    n_obs_steps: ${n_obs_steps}
+    n_action_steps: ${n_action_steps}
+    scene_gs_cfg_name: fr3_stack_with_normals
+    num_gaussians: ${task.num_gaussians}
+    min_opacity: ${task.min_opacity}
+    use_gsplat_viewer: false
+
+  # Logging / visualization.
+  callbacks:
+    - _target_: diffusion_policy_3d.env_runner.maniskill_callbacks.GaussianAttentionPlotCallback
+    - _target_: diffusion_policy_3d.env_runner.maniskill_callbacks.VideoSavingCallback
+      fps: 10
+      add_attention_legend: true  # only feasible with GaussianAttentionPlotCallback
+    - _target_: diffusion_policy_3d.env_runner.maniskill_callbacks.TrajectoryPlotCallback
+      representation_space: ${task.representation_space}
 
 dataset:
-  _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_zarr_dataset.WristCamGSManiskillDataset
-  # --- Three ways to specify datasets ---
-  # 1. Single zarr path (has .zgroup inside):
-  zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_1_with_tcp_positions_surf_normals_opacities_active_gaussians_mask_semantics
-  # 2. Parent directory (all zarr children auto-discovered):
-  # zarr_path: /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_all
-  # 3. Explicit list:
-  # zarr_path:
-    # - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_1_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
-    # - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_2_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
-    # - /home/toelle/Projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_3_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
-    # - /home/toelle/Projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_4_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
-    # - /home/toelle/Projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_5_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
-    # - /home/toelle/Projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_6_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
-    # - /home/toelle/Projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_7_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
-    # - /home/toelle/Projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_8_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
-    # - /home/toelle/Projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_9_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
-    # - /home/toelle/Projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_simple_10_positions_surf_normals_active_gaussians_mask_semantics_downsampled_10k
+  _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_memmap_dataset.WristCamGSMemmapManiskillDataset
+  # One entry per converted dataset
+  dataset_path:
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_1_positions_surf_normals_opacities_active_gaussians_mask_semantics
+    
+  representation_space: ${task.representation_space}
+  min_opacity: ${task.min_opacity}
+  num_gaussians: ${task.num_gaussians}
+  # relative_ee_pose percentile stats: histogram over anchor-relative positions.
+  # bin width = 2 * range / num_bins = 1.4e-6 m. Do NOT override per sweep -- the same
+  # estimator constants across all runs are what keeps normalizations comparable.
+  percentile_histogram_range: 3.0
+  percentile_histogram_num_bins: ${eval:'2 ** 22'}
+
+# train_data_augmentations / val_data_augmentations default to [] in maniskill_base.
+# If needed, override here with GPU augmentations from dataset/data_augmentations.py
+# (list entries get chained and executed in sequence).
+# NOTE: WristCamGSMemmapManiskillDataset does active+high-opacity filter and downsample to num_gaussians on the cpu

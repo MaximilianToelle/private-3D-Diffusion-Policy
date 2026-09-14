@@ -38,7 +38,9 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 class TrainDP3Workspace:
     include_keys = ['global_step', 'epoch']
-    exclude_keys = ('compiled_model',)
+    # torch.compile now wraps submodules inside each policy (off the module registry),
+    # so no compiled wrapper ever lands in a saved state_dict — nothing to exclude.
+    exclude_keys = ()
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
         self.cfg = cfg
@@ -55,6 +57,12 @@ class TrainDP3Workspace:
             self.model: DP3 = hydra.utils.instantiate(cfg.policy)
         elif cfg.policy._target_ == "diffusion_policy_3d.policy.gsplat_dp3.GSplatDP3":
             self.model: GSplatDP3 = hydra.utils.instantiate(cfg.policy)
+        elif cfg.policy._target_ == "diffusion_policy_3d.policy.mindmap_dp3.MindmapDP3":
+            # from diffusion_policy_3d.policy.mindmap_dp3 import MindmapDP3
+            # self.model: MindmapDP3 = hydra.utils.instantiate(cfg.policy)
+            raise ValueError(f"Integration not yet finished for {cfg.policy._target_}")
+        else:
+            raise ValueError(f"Unknown policy target: {cfg.policy._target_}")
 
         self.ema_model: DP3 = None
         if cfg.training.use_ema:
@@ -64,8 +72,22 @@ class TrainDP3Workspace:
                 self.ema_model = hydra.utils.instantiate(cfg.policy)
 
         # configure training state
-        self.optimizer = hydra.utils.instantiate(
-            cfg.optimizer, params=self.model.parameters())
+        # Policies may define their own parameter grouping (e.g. MindmapDP3
+        # replicates mindmap's no-weight-decay-for-bias/LayerNorm groups).
+        # Constructed directly (not via hydra.instantiate) because hydra wraps
+        # the param-group dicts into DictConfigs, which torch optimizers reject.
+        if hasattr(self.model, "get_optimizer_param_groups"):
+            param_groups = self.model.get_optimizer_param_groups(cfg.optimizer.weight_decay)
+            optimizer_cls = hydra.utils.get_class(cfg.optimizer._target_)
+            optimizer_kwargs = {
+                k: v for k, v in OmegaConf.to_container(cfg.optimizer, resolve=True).items()
+                if k != "_target_"
+            }
+            self.optimizer = optimizer_cls(param_groups, **optimizer_kwargs)
+        else:
+            # same hyperparameters for all parameters
+            self.optimizer = hydra.utils.instantiate(
+                cfg.optimizer, params=self.model.parameters())
 
         # configure training state
         self.global_step = 0
@@ -85,23 +107,13 @@ class TrainDP3Workspace:
             RUN_ROLLOUT = True
             verbose = True
             cfg.task.env_runner.eval_episodes = 2
-            cfg.task.dataset.max_train_episodes = 5
+            cfg.task.dataset.num_train_episodes = 5
         else:
             RUN_ROLLOUT = True
             verbose = False
         
         RUN_VALIDATION = True # reduce time cost
         
-        # resume training
-        if cfg.training.resume:
-            lastest_ckpt_path = self.get_checkpoint_path()
-            if lastest_ckpt_path.is_file():
-                print(f"Resuming from checkpoint {lastest_ckpt_path}")
-                self.load_checkpoint(path=lastest_ckpt_path)
-                # Checkpoint is saved at the end of an epoch before epoch is incremented.
-                # global_step (optimizer updates) is already at its correct value.
-                self.epoch += 1
-
         # configure dataset
         dataset: BaseDataset
         dataset = hydra.utils.instantiate(cfg.task.dataset)
@@ -112,6 +124,45 @@ class TrainDP3Workspace:
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
+
+        # configure lr scheduler
+        # Stored on self so save_checkpoint/load_payload pick it up via its
+        # state_dict. Constructed fresh (last_epoch=-1) BEFORE the resume block:
+        # torch's recommended resume is load_state_dict on a fresh scheduler,
+        # which is exact for both branches.
+        # All schedulers here are stepped every optimizer update, not every epoch.
+        steps_per_epoch = len(train_dataloader) // cfg.training.gradient_accumulate_every
+
+        if cfg.training.lr_scheduler == "linear_to_end_factor":
+            # mindmap's schedule: linear decay from lr to lr*end_factor over the
+            # first convergence_percentage of training steps, constant afterwards.
+            self.lr_scheduler = torch.optim.lr_scheduler.LinearLR(
+                self.optimizer,
+                start_factor=cfg.training.lr_start_factor,
+                end_factor=cfg.training.lr_end_factor,
+                total_iters=int(
+                    steps_per_epoch * cfg.training.num_epochs
+                    * cfg.training.lr_convergence_percentage
+                ),
+            )
+        else:
+            self.lr_scheduler = get_scheduler(
+                cfg.training.lr_scheduler,
+                optimizer=self.optimizer,
+                num_warmup_steps=cfg.training.lr_warmup_steps,
+                num_training_steps=steps_per_epoch * cfg.training.num_epochs,
+            )
+
+        # resume training (restores model, ema_model, optimizer and lr_scheduler
+        # states plus global_step/epoch)
+        if cfg.training.resume:
+            lastest_ckpt_path = self.get_checkpoint_path()
+            if lastest_ckpt_path.is_file():
+                print(f"Resuming from checkpoint {lastest_ckpt_path}")
+                self.load_checkpoint(path=lastest_ckpt_path)
+                # Checkpoint is saved at the end of an epoch before epoch is incremented.
+                # global_step (optimizer updates) is already at its correct value.
+                self.epoch += 1
 
         # configure GPU augmentations
         if 'train_data_augmentations' in cfg.task and cfg.task.train_data_augmentations is not None:
@@ -130,19 +181,13 @@ class TrainDP3Workspace:
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(normalizer)
 
-        # configure lr scheduler
-        L = len(train_dataloader)
-        steps_per_epoch = L // cfg.training.gradient_accumulate_every
-
-        lr_scheduler = get_scheduler(
-            cfg.training.lr_scheduler,
-            optimizer=self.optimizer,
-            num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=steps_per_epoch * cfg.training.num_epochs,
-            # pytorch assumes stepping LRScheduler every epoch
-            # however huggingface diffusers steps it every batch
-            last_epoch=self.global_step - 1
-        )
+        # Data-derived normalization bounds (nvblox/mindmap datasets expose them
+        # from the zarr attr). Set on BOTH models: EMA only averages parameters,
+        # not buffers. Persisted via state_dict, so checkpoints carry them.
+        if hasattr(dataset, 'workspace_bounds'):
+            self.model.set_workspace_bounds(dataset.workspace_bounds)
+            if cfg.training.use_ema:
+                self.ema_model.set_workspace_bounds(dataset.workspace_bounds)
 
         # configure ema
         ema: EMAModel = None
@@ -193,8 +238,15 @@ class TrainDP3Workspace:
             self.ema_model.to(device)
         optimizer_to(self.optimizer, device)
         
-        # operator fusion via torch.compile
-        self.compiled_model = torch.compile(self.model, mode="max-autotune")
+        # operator fusion via torch.compile (opt out for models with data-dependent
+        # loops that trace poorly, e.g. DiffuserActor's FPS). Each policy compiles its
+        # own compute-heavy submodules in place while keeping the uncompiled originals
+        # registered, so checkpoints stay portable (see BasePolicy.apply_torch_compile).
+        if cfg.training.use_torch_compile:
+            compile_mode = cfg.training.get('torch_compile_mode', 'default')
+            self.model.apply_torch_compile(compile_mode)
+            if self.ema_model is not None:
+                self.ema_model.apply_torch_compile(compile_mode)
 
         # pre-select a fixed random batch for action MSE tracking (never used for gradient steps)
         # augmentations applied once here so the metric is fully deterministic across epochs
@@ -214,9 +266,21 @@ class TrainDP3Workspace:
                 t_before_next_batch = time.time()
                 for batch_idx, batch in enumerate(tepoch):
                     t1 = time.time()
-                   
-                    # device transfer
+
+                    # device transfer.
+                    # The copy is async (non_blocking=True), so CPU wall-clock (t1_1 - t1) only
+                    # measures the LAUNCH, not the copy — and the copy's real cost would otherwise
+                    # leak into the next op's timing. We measure the true GPU transfer time with
+                    # CUDA events (recorded on the stream, no CPU stall); we read elapsed_time later
+                    # inside `if verbose` after a natural sync (loss.backward / .item), so NO extra
+                    # synchronize is added to the hot path.
+                    if verbose and torch.cuda.is_available():
+                        h2d_start = torch.cuda.Event(enable_timing=True)
+                        h2d_end = torch.cuda.Event(enable_timing=True)
+                        h2d_start.record()
                     batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                    if verbose and torch.cuda.is_available():
+                        h2d_end.record()
                     t1_1 = time.time()
 
                     # augmentations
@@ -224,7 +288,7 @@ class TrainDP3Workspace:
                     t1_2 = time.time()
                     
                     # compute loss
-                    raw_loss, loss_dict = self.compiled_model.compute_loss(batch)
+                    raw_loss, loss_dict = self.model.compute_loss(batch)
                     loss = raw_loss / cfg.training.gradient_accumulate_every
                     loss.backward()
                     t1_3 = time.time()
@@ -251,7 +315,7 @@ class TrainDP3Workspace:
 
                         self.optimizer.step()
                         self.optimizer.zero_grad(set_to_none=True)
-                        lr_scheduler.step()
+                        self.lr_scheduler.step()
                         t1_5 = time.time()
 
                         # update ema
@@ -276,7 +340,7 @@ class TrainDP3Workspace:
                                 'total_l2_grad_norm': grad_norm,
                                 'global_step': self.global_step,
                                 'epoch': self.epoch,
-                                'lr': lr_scheduler.get_last_lr()[0],
+                                'lr': self.lr_scheduler.get_last_lr()[0],
                             }
                             
                             tepoch.set_postfix(loss=mean_loss, refresh=False)
@@ -291,7 +355,14 @@ class TrainDP3Workspace:
                     if verbose:
                         print(f" total one step time: {t1_7-t_before_next_batch:.3f}")
                         print(f" batch generation time {t1-t_before_next_batch:.3f}")
-                        print(f" device transfer time: {t1_1-t1:.3f}")
+                        # True GPU H2D transfer time (CUDA events). At this point loss.backward()
+                        # and the logging .item() have already synced the stream, so reading the
+                        # event does not add a stall. The CPU-side numbers below (t1_1-t1 launch,
+                        # t1_2-t1_1 augment) are kept for reference but are NOT the transfer cost.
+                        if torch.cuda.is_available():
+                            h2d_ms = h2d_start.elapsed_time(h2d_end)  # milliseconds
+                            print(f" device transfer time (GPU, cuda-event): {h2d_ms/1000:.3f}")
+                        print(f" device transfer launch (cpu): {t1_1-t1:.3f}")
                         print(f" augmentations time: {t1_2-t1_1:.3f}")
                         print(f" compute loss time: {t1_3-t1_2:.3f}")
                         print(f" diagnostic metrics time: {t1_4-t1_3:.3f}")
@@ -315,7 +386,9 @@ class TrainDP3Workspace:
             if ((self.epoch + 1) % cfg.training.rollout_every) == 0 and RUN_ROLLOUT and env_runner is not None:
                 t3 = time.time()
                 runner_log_train = env_runner.run(policy, dataset=dataset, prefix=f"train_epoch_{self.epoch}")
-                runner_log_val = env_runner.run(policy, dataset=val_dataset, prefix=f"val_epoch_{self.epoch}")
+                # Nothing is held out when num_train_episodes is unset (train on everything).
+                runner_log_val = ({} if len(val_dataset) == 0 else
+                    env_runner.run(policy, dataset=val_dataset, prefix=f"val_epoch_{self.epoch}"))
                 t4 = time.time()
                 if verbose:
                     print(f"rollout time: {(t4-t3)/2:.3f}")
@@ -431,8 +504,22 @@ class TrainDP3Workspace:
         policy.eval()
         policy.to(torch.device(cfg.training.device))
 
+        # compile so the diffusion sampling loop runs the accelerated submodules.
+        # eval uses its own mode: an eval run is short relative to a 12-24h training run,
+        # so a heavy max-autotune warmup usually will not amortize the way it does in run().
+        if cfg.training.use_torch_compile:
+            policy.apply_torch_compile(cfg.training.get('eval_torch_compile_mode', 'default'))
+
         if use_dataset:
-            runner_log = env_runner.run(policy, prefix=f"seperate_eval_val_epoch_{self.epoch}", dataset=val_dataset)
+            runner_log = env_runner.run(policy, prefix=f"seperate_eval_train_epoch_{self.epoch}", dataset=dataset)
+            cprint(f"---------------- Eval Results - Train Dataset --------------", 'magenta')
+            for key, value in runner_log.items():
+                if isinstance(value, float):
+                    cprint(f"{key}: {value:.4f}", 'magenta')
+
+            # Nothing is held out when num_train_episodes is unset (train on everything).
+            runner_log = ({} if len(val_dataset) == 0 else env_runner.run(
+                policy, prefix=f"seperate_eval_val_epoch_{self.epoch}", dataset=val_dataset))
             cprint(f"---------------- Eval Results - Validation Dataset --------------", 'magenta')
             for key, value in runner_log.items():
                 if isinstance(value, float):
@@ -508,8 +595,6 @@ class TrainDP3Workspace:
             else:
                 return pathlib.Path(self.output_dir).joinpath('checkpoints', f'{tag}.ckpt')
             
-            
-
     def load_payload(self, payload, exclude_keys=None, include_keys=None, **kwargs):
         if exclude_keys is None:
             exclude_keys = tuple()
@@ -517,8 +602,14 @@ class TrainDP3Workspace:
             include_keys = payload['pickles'].keys()
 
         for key, value in payload['state_dicts'].items():
-            if key not in exclude_keys:
-                self.__dict__[key].load_state_dict(value, **kwargs)
+            if key in exclude_keys:
+                continue
+            if key not in self.__dict__:
+                # e.g. lr_scheduler only exists during run(); eval-time loading
+                # (eval(), create_from_checkpoint) has nothing to restore it into
+                cprint(f"load_payload: skipping '{key}', workspace has no such attribute", 'yellow')
+                continue
+            self.__dict__[key].load_state_dict(value, **kwargs)
         for key in include_keys:
             if key in payload['pickles']:
                 self.__dict__[key] = dill.loads(payload['pickles'][key])

@@ -1,16 +1,13 @@
 defaults:
-  - maniskill_stack  
-  - _self_            
+  - maniskill_base
+  - _self_
+
+# Scene layer for the wrist-cam "stack" task, shared by every observation-space variant
+# (…_gs_stack, …_pcd_stack, …). It fixes the SAPIEN env; leaf configs add only their
+# perception head (shape_meta + obs-wrapper builder + callbacks) and their dataset.
+# NOTE: this is an inheritance parent, never selected directly as `task=`.
 
 name: maniskill_wrist_cam_stack
 
 env_runner:
-  task_name: StackFr3WristCamEnv-v1
-  robot_uids: "fr3_umi_wrist435_modified"
-  cam_name: "wrist_cam"
-
-dataset:
-  zarr_path: /home/max/projects/gsplat_policy/datasets/3d_diffusion_policy/stack_wrist_cam
-
-train_data_augmentations: []
-val_data_augmentations: []
+  task_name: StackFr3WristCamEnv-v1   # StackFr3WristCamSimpleEnv-v1 / StackFr3WristCamEnv-v1

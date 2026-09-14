@@ -13,13 +13,24 @@ shape_meta: &shape_meta
       - ${eval:'{"relative_ee_pose":10,"abs_joint_pos":8}["${task.representation_space}"]'}
 
 env_runner:
-  eval_episodes: 20
-  max_steps: 400
+  # Runner class + param wiring is identical for every maniskill task/obs-space, so it
+  # lives here. Scene/leaf configs override only task_name and the obs-wrapper builder and callbacks.
+  _target_: diffusion_policy_3d.env_runner.maniskill_runner.ManiSkillRunner
+  task_name: StackFr3Env-v1
+  representation_space: ${task.representation_space}
+  agent_proprio_dim: ${task.shape_meta.obs.agent_proprio.shape[0]}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
-  fps: 10
+  eval_episodes: 20
+  robot_uids: fr3_umi_wrist435_modified
+  obs_mode: rgb+depth+segmentation
   n_envs: 1
-  task_name: StackFr3Env-v1
+  max_steps: 400
+  sim_freq: 100
+  control_freq: 20
+  tqdm_interval_sec: 5.0
+  device: cuda:0
+  depth_mode: null              # null (gt rasterizer) | fast_foundation_stereo
 
 dataset:
   horizon: ${horizon}
@@ -27,5 +38,15 @@ dataset:
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}
   seed: 42
-  val_ratio: 0.05
-  max_train_episodes: null  # null: use max number of train episodes while respecting val_ratio
+  # Validation is ALWAYS every episode that is not trained on, for the validation loss and the
+  # validation rollouts alike, so the two are never measured on different episodes.
+  #   num_train_episodes: K    -> train on K seeded-random episodes, validate on ALL others.
+  #     Single-trajectory training therefore validates against the whole rest of the dataset.
+  #     Asking for more episodes than the dataset holds is an error, never a silent cap.
+  #   num_train_episodes: null -> train on every episode: no validation loss, no validation
+  #     rollout.
+  num_train_episodes: null
+
+# Default: no GPU data augmentations. Leaves override when they need them.
+train_data_augmentations: []
+val_data_augmentations: []

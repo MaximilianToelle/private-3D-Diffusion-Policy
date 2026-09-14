@@ -129,9 +129,37 @@ class DP3(BasePolicy):
 
 
         print_params(self)
-        
+
+    # ========= torch.compile ============
+    # The compute-heavy submodules (denoising net, obs encoder) are the only parts
+    # worth compiling: they are pure tensor->tensor and are invoked via __call__ inside
+    # compute_loss and the sampling loop, so torch.compile actually fires on them (unlike
+    # a top-level compile of the policy, whose forward is never called). The compiled
+    # handles are stored OFF the nn.Module registry via object.__setattr__, so they never
+    # appear in state_dict()/parameters() — checkpoints stay uncompiled and portable. They
+    # share the exact same parameter tensors as the originals (torch.compile does not copy
+    # params), so training/EMA updates and load_state_dict on the originals are seen by the
+    # compiled handles automatically.
+    def apply_torch_compile(self, mode: str = 'default'):
+        # dynamic=False: specialize per concrete shape instead of letting dynamo promote
+        # the batch dim to a symbolic. conditional_unet1d uses einops.rearrange, which hits
+        # a dynamo "unhashable SymInt" bug under dynamic shapes (torch 2.5.1). Batch sizes
+        # here are few (train / val / rollout), so the extra recompiles are cheap.
+        object.__setattr__(self, '_compiled_model', torch.compile(self.model, mode=mode, dynamic=False))
+        object.__setattr__(self, '_compiled_obs_encoder', torch.compile(self.obs_encoder, mode=mode, dynamic=False))
+
+    @property
+    def _active_model(self):
+        compiled_model = self.__dict__.get('_compiled_model')
+        return compiled_model if compiled_model is not None else self.model
+
+    @property
+    def _active_obs_encoder(self):
+        compiled_obs_encoder = self.__dict__.get('_compiled_obs_encoder')
+        return compiled_obs_encoder if compiled_obs_encoder is not None else self.obs_encoder
+
     # ========= inference  ============
-    def conditional_sample(self, 
+    def conditional_sample(self,
             condition_data, condition_mask,
             condition_data_pc=None, condition_mask_pc=None,
             local_cond=None, global_cond=None,
@@ -139,7 +167,7 @@ class DP3(BasePolicy):
             # keyword arguments to scheduler.step
             **kwargs
             ):
-        model = self.model
+        model = self._active_model
         scheduler = self.noise_scheduler
 
 
@@ -203,7 +231,7 @@ class DP3(BasePolicy):
         if self.obs_as_global_cond:
             # condition through global feature
             this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
+            nobs_features = self._active_obs_encoder(this_nobs)
             if "cross_attention" in self.condition_type:
                 # treat as a sequence
                 global_cond = nobs_features.reshape(B, self.n_obs_steps, -1)
@@ -216,7 +244,7 @@ class DP3(BasePolicy):
         else:
             # condition through impainting
             this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
+            nobs_features = self._active_obs_encoder(this_nobs)
             # reshape back to B, T, Do
             nobs_features = nobs_features.reshape(B, To, -1)
             cond_data = torch.zeros(size=(B, T, Da+Do), device=device, dtype=dtype)
@@ -279,7 +307,7 @@ class DP3(BasePolicy):
             # reshape B, T, ... to B*T
             this_nobs = dict_apply(nobs, 
                 lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
+            nobs_features = self._active_obs_encoder(this_nobs)
 
             if "cross_attention" in self.condition_type:
                 # treat as a sequence
@@ -293,7 +321,7 @@ class DP3(BasePolicy):
         else:
             # reshape B, T, ... to B*T
             this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]))
-            nobs_features = self.obs_encoder(this_nobs)
+            nobs_features = self._active_obs_encoder(this_nobs)
             # reshape back to B, T, Do
             nobs_features = nobs_features.reshape(batch_size, horizon, -1)
             cond_data = torch.cat([nactions, nobs_features], dim=-1)
@@ -329,7 +357,7 @@ class DP3(BasePolicy):
 
         # Predict the noise residual
         
-        pred = self.model(sample=noisy_trajectory, 
+        pred = self._active_model(sample=noisy_trajectory, 
                         timestep=timesteps, 
                             local_cond=local_cond, 
                             global_cond=global_cond)

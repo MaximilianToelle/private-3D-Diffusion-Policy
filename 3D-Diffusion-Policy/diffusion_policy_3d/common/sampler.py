@@ -74,6 +74,27 @@ def downsample_mask(mask, max_n, seed=0):
         assert np.sum(train_mask) == n_train
     return train_mask
 
+
+def train_episode_mask(n_episodes, num_train_episodes, seed=0):
+    """Mask marking the episodes to train on; every episode NOT marked is validation.
+
+    num_train_episodes=None trains on all episodes (empty validation). Asking for more
+    episodes than the dataset holds is an error, never a silent cap. Shared by every
+    maniskill dataset so all baselines split identically for the same seed.
+    """
+    if num_train_episodes is None:
+        return np.ones(n_episodes, dtype=bool)
+    assert 0 < num_train_episodes <= n_episodes, (
+        f"num_train_episodes={num_train_episodes}, but the dataset holds "
+        f"{n_episodes} episodes"
+    )
+    rng = np.random.default_rng(seed=seed)
+    train_idxs = rng.choice(n_episodes, size=int(num_train_episodes), replace=False)
+    train_mask = np.zeros(n_episodes, dtype=bool)
+    train_mask[train_idxs] = True
+    return train_mask
+
+
 class SequenceSampler:
     def __init__(self, 
         replay_buffer: ReplayBuffer, 

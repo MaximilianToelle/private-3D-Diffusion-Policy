@@ -1,13 +1,15 @@
 defaults:
   - base_dp3
-  - override task: maniskill_gs_stack
+  # the only gs task left after the wrist-cam migration (maniskill_gs_stack is gone);
+  # wrist_cam_gsplat_dp3 re-overrides to the same task and stays the config to launch
+  - override task: maniskill_wrist_cam_gs_stack
   - _self_
 
 name: train_gsplat_dp3
 
 policy:
   _target_: diffusion_policy_3d.policy.gsplat_dp3.GSplatDP3
-  encoder_output_dim: 64     # 128
+  encoder_output_dim: 128     # 128
   use_state_features: true
 
   # Gaussian Splatting parameters
@@ -26,7 +28,7 @@ policy:
     # ── Config for raw_concat (which parameters to use) ──
     raw_keys:         
       - gs_positions
-      - gs_surface_normals
+    #   - gs_surface_normals
 
     backbone_channels: [256, 512, 1024]     # in DP3 with XYZRGB-Encoder [64, 128, 256, 512]
     use_layernorm: true                     # in backbone

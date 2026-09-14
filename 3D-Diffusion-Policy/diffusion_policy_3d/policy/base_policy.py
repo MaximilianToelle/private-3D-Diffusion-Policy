@@ -19,6 +19,21 @@ class BasePolicy(ModuleAttrMixin):
     def reset(self):
         pass
 
+    def apply_torch_compile(self, mode: str = 'default'):
+        """Compile the policy's compute-heavy submodules in place.
+
+        Policies that support torch.compile override this to wrap their submodules
+        while keeping the uncompiled originals registered for checkpointing (see DP3).
+        The default raises: if training.use_torch_compile is set but a policy does not
+        implement compilation, fail loudly rather than silently running eager.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement torch.compile "
+            f"(no apply_torch_compile override), but training.use_torch_compile is enabled. "
+            f"Set training.use_torch_compile=False for this policy, or implement "
+            f"apply_torch_compile on it."
+        )
+
     # ========== training ===========
     # no standard training interface except setting normalizer
     def set_normalizer(self, normalizer: LinearNormalizer):

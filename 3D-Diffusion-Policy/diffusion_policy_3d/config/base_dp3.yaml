@@ -26,11 +26,11 @@ policy:
   
   diffusion_step_embed_dim: 128
   down_dims:
-  - 512   # 128
-  - 1024  # 256
-  - 2048  # 512
+  - 256   # 128, 512
+  - 512  # 256, 1024
+  - 1024  # 512, 2048
 
-  encoder_output_dim: 64
+  encoder_output_dim: 128
   horizon: ${horizon}
   kernel_size: 5
   n_action_steps: ${n_action_steps}
@@ -63,24 +63,24 @@ ema:
 
 dataloader:
   batch_size: 128
-  num_workers: 0
+  num_workers: 8
   shuffle: True
   pin_memory: True
-  persistent_workers: False
-  prefetch_factor: null
+  persistent_workers: True
+  prefetch_factor: 4
   drop_last: True
 
 val_dataloader:
   batch_size: 128
-  num_workers: 0
+  num_workers: 8
   shuffle: False
   pin_memory: True
-  persistent_workers: False
-  prefetch_factor: null
+  persistent_workers: True
+  prefetch_factor: 4
 
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 3.0e-4 # 1.0e-4
+  lr: 1.0e-4
   betas: [0.95, 0.999]
   eps: 1.0e-8
   weight_decay: 1.0e-6
@@ -90,13 +90,16 @@ training:
   seed: 42
   debug: False
   resume: True
-  lr_scheduler: cosine       # constant, constant_with_warmup
+  lr_scheduler: constant       # constant, constant_with_warmup, cosine
   lr_warmup_steps: 3600      # 1% of training -> 90 traj, 180 gradient steps per epoch, 2000 epochs
   num_epochs: 2000     
   gradient_accumulate_every: 1
-  grad_clip_norm: null         # max_norm for clip_grad_norm_; set to null to disable gradient clipping
+  grad_clip_norm: 1.0         # max_norm for clip_grad_norm_; set to null to disable gradient clipping
   use_ema: True
-  rollout_every: 400
+  use_torch_compile: True
+  torch_compile_mode: max-autotune        # training compile mode
+  eval_torch_compile_mode: default        # eval compile mode (shorter run; keep warmup cheap)
+  rollout_every: 200
   checkpoint_every: ${training.rollout_every}  # checkpoint.topk.monitor_key requires validation rollouts during same epoch!
   val_every: 200
   sample_every: 200              

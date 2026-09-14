@@ -1,0 +1,7 @@
+defaults:
+  - dp3
+  - scene_representation: spatial_memory_pcd
+  - override task: maniskill_wrist_cam_spatial_memory_pcd_stack
+  - _self_
+
+name: train_wrist_cam_dp3
