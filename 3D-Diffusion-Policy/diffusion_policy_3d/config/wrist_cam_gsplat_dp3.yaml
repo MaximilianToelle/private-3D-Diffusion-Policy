@@ -1,6 +1,6 @@
 defaults:
   - gsplat_dp3
-  - override task: maniskill_wrist_cam_gs_stack
+  - override task: maniskill_wrist_cam_gsworld_stack
   - _self_
 
 name: train_wrist_cam_gsplat_dp3

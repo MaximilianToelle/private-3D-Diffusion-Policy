@@ -3,7 +3,7 @@
 # bash scripts/eval_policy.sh dp3 adroit_hammer 0322 0 0
 # bash scripts/eval_policy.sh dp3 maniskill_stack 0112 42 0
 # bash scripts/eval_policy.sh gsplat_dp3 maniskill_gs_stack 0112 42 0 best
-# bash scripts/eval_policy.sh wrist_cam_gsplat_dp3 maniskill_wrist_cam_gs_stack full_dataset_training 42 0 best 
+# bash scripts/eval_policy.sh wrist_cam_gsplat_dp3 maniskill_wrist_cam_gsworld_stack full_dataset_training 42 0 best 
 
 
 DEBUG=False

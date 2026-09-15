@@ -31,7 +31,7 @@ and evaluation, which need `nvblox_torch` and therefore `gsplat_policy_nvblox`.
 Train from this directory, with arguments train config, task, run label, seed and GPU id:
 
 ```bash
-bash scripts/train_policy.sh wrist_cam_gsplat_dp3 maniskill_wrist_cam_gs_stack full_dataset 42 0
+bash scripts/train_policy.sh wrist_cam_gsplat_dp3 maniskill_wrist_cam_gsworld_stack full_dataset 42 0
 ```
 
 Rollouts run inside training via `ManiSkillRunner`, so a training run also exercises the

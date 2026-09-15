@@ -1,0 +1,36 @@
+defaults:
+  - maniskill_wrist_cam_gs_base
+  - _self_
+
+# GSWorld variant of the wrist-cam stack task: the Gaussians come from GSWorld's pre-scanned assets.
+
+name: maniskill_wrist_cam_gsworld_stack
+
+env_runner:
+  # Builds the perception-head wrappers; the env_runner appends shared wrappers
+  # Add all perception-specific params, env_runner injects base_env and device
+  maniskill_env_obs_wrapper_builder:
+    _target_: diffusion_policy_3d.env_runner.maniskill_env_obs_wrapper_builder.wrist_cam_online_gaussian_splatting
+    _partial_: true
+    representation_space: ${task.representation_space}
+    agent_proprio_dim: ${task.shape_meta.obs.agent_proprio.shape[0]}
+    n_obs_steps: ${n_obs_steps}
+    n_action_steps: ${n_action_steps}
+    scene_gs_cfg_name: fr3_stack_with_normals
+    num_gaussians: ${task.num_gaussians}
+    min_opacity: ${task.min_opacity}
+    use_gsplat_viewer: false
+
+  callbacks:
+    - _target_: diffusion_policy_3d.env_runner.maniskill_callbacks.GaussianAttentionPlotCallback
+    - _target_: diffusion_policy_3d.env_runner.maniskill_callbacks.VideoSavingCallback
+      fps: 10
+      add_attention_legend: true  # only feasible with GaussianAttentionPlotCallback
+    - _target_: diffusion_policy_3d.env_runner.maniskill_callbacks.TrajectoryPlotCallback
+      representation_space: ${task.representation_space}
+
+dataset:
+  _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_memmap_dataset.WristCamGSMemmapManiskillDataset  
+  # One entry per converted dataset
+  dataset_path:
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_1_positions_surf_normals_opacities_active_gaussians_mask_semantics

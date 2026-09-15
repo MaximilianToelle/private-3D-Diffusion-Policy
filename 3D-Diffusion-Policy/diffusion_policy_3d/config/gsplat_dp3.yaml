@@ -1,8 +1,6 @@
 defaults:
   - base_dp3
-  # the only gs task left after the wrist-cam migration (maniskill_gs_stack is gone);
-  # wrist_cam_gsplat_dp3 re-overrides to the same task and stays the config to launch
-  - override task: maniskill_wrist_cam_gs_stack
+  - override task: maniskill_wrist_cam_gsworld_stack
   - _self_
 
 name: train_gsplat_dp3

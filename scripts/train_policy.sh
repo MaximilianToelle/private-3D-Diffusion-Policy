@@ -6,7 +6,7 @@
 # bash scripts/train_policy.sh dp3 maniskill_stack 0112 42 0
 # bash scripts/train_policy.sh wrist_cam_dp3 maniskill_wrist_cam_stack single_demo 42 0
 # bash scripts/train_policy.sh gsplat_dp3 maniskill_gs_stack single_demo 42 0
-# bash scripts/train_policy.sh wrist_cam_gsplat_dp3 maniskill_wrist_cam_gs_stack single_demo 42 0
+# bash scripts/train_policy.sh wrist_cam_gsplat_dp3 maniskill_wrist_cam_gsworld_stack single_demo 42 0
 
 
 DEBUG=False
