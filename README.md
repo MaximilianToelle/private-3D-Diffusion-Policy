@@ -15,6 +15,7 @@ Upstream's docs are preserved in [DP3_README.md](DP3_README.md), [INSTALL.md](IN
 | Gaussian splats, wrist camera | `wrist_cam_gsplat_dp3` | none | `convert_wrist_cam_gsworld_to_gsplat_dp3_memmap.py` |
 | Accumulated point cloud | `wrist_cam_spatial_memory_dp3` | `SpatialMemoryPcdSceneMapper` | `convert_wrist_cam_gsworld_to_spatial_memory_pcd_memmap.py` |
 | nvblox TSDF + RADIO features | `mindmap_dp3` | `NvbloxSceneMapper` | `convert_wrist_cam_gsworld_to_nvblox_mindmap.py` |
+| DynaGSLAM online Gaussians, wrist camera | `wrist_cam_dynagslam_gsplat_dp3` | `DynaGSLAMSceneMapper` | none yet -- the task's dataset keys are left `???`; rollouts only, see `DYNAGSLAM_INTEGRATION.md` |
 | Single-frame point cloud | none yet | none | `convert_wrist_cam_gsworld_to_dp3.py` |
 
 Converters live in the outer repository under `scripts/dataset/conversion/`.

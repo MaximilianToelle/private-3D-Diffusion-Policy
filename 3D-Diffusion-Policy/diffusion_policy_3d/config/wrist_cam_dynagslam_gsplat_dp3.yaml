@@ -1,0 +1,7 @@
+defaults:
+  - gsplat_dp3
+  - scene_representation: dynagslam
+  - override task: maniskill_wrist_cam_dynagslam_stack
+  - _self_
+
+name: train_wrist_cam_dynagslam_gsplat_dp3

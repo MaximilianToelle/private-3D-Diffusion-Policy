@@ -270,3 +270,62 @@ def wrist_cam_nvblox_reconstruction(
         num_vertices=composed["num_vertices"],
         vertex_sampling_method=composed["vertex_sampling_method"],
     )
+
+
+def wrist_cam_dynagslam(
+    *,
+    # injected by ManiSkillRunner
+    base_env,
+    device,
+    # defined in config, injected by hydra
+    representation_space,
+    agent_proprio_dim,
+    cam_name,
+    scene_representation,
+    num_gaussians,
+    min_opacity,
+    use_gsplat_viewer,
+):
+    """
+    Wrist-camera online DynaGSLAM perception head.
+
+    DynaGSLAM reconstructs the Gaussian map live from the wrist camera's posed RGB-D frames
+    (ground-truth pose and segmentation from the simulator stand in for its tracker and SAM),
+    and the map is exposed in the gs_* layout of the gsplat baseline, so the same GSplatDP3
+    policy consumes it. The SLAM parameters come from the composed scene_representation
+    config (config/scene_representation/dynagslam.yaml). No DynaGSLAM dataset converter exists
+    yet, hence no dataset stamp to assert against: policies are trained on the gsplat datasets
+    and evaluated on DynaGSLAM observations.
+    """
+    assert representation_space in ("abs_joint_pos", "relative_ee_pose"), \
+        f"representation_space must be 'abs_joint_pos' or 'relative_ee_pose', got '{representation_space}'"
+
+    from omegaconf import OmegaConf
+
+    from diffusion_policy_3d.baseline_scene_integration.dynagslam_scene_mapper import (
+        DynaGSLAMSceneMapper,
+    )
+    from diffusion_policy_3d.env.maniskill.observation_wrapper.dynagslam.maniskill_dynagslam_wrapper import (
+        DynaGSLAMManiSkillDP3Wrapper,
+    )
+
+    # DynaGSLAM reads its settings as attributes and the mapper forces use_gt_pose / mode on
+    # them, so it gets its own mutable copy instead of hydra's struct-locked node.
+    slam_args = OmegaConf.create(OmegaConf.to_container(scene_representation, resolve=True))
+    scene_mapper = DynaGSLAMSceneMapper(
+        slam_args=slam_args,
+        optimization_params=slam_args,   # one config carries both, as in the original runner
+        control_freq=base_env.unwrapped.control_freq,
+        device=device,
+    )
+
+    return DynaGSLAMManiSkillDP3Wrapper(
+        base_env,
+        representation_space,
+        agent_proprio_dim=agent_proprio_dim,
+        cam_name=cam_name,
+        scene_mapper=scene_mapper,
+        num_gaussians=num_gaussians,
+        min_opacity=min_opacity,
+        use_gsplat_viewer=use_gsplat_viewer,
+    )
