@@ -16,13 +16,13 @@ env_runner:
   # Runner class + param wiring is identical for every maniskill task/obs-space, so it
   # lives here. Scene/leaf configs override only task_name and the obs-wrapper builder and callbacks.
   _target_: diffusion_policy_3d.env_runner.maniskill_runner.ManiSkillRunner
-  task_name: StackFr3Env-v1
+  task_name: StackFr3WristCamEnv-v1
   representation_space: ${task.representation_space}
   agent_proprio_dim: ${task.shape_meta.obs.agent_proprio.shape[0]}
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   eval_episodes: 20
-  robot_uids: fr3_umi_wrist435_modified
+  robot_uids: fr3_umi_wrist_zedxmini   # the only registered wrist-cam robot since the ZED X Mini migration
   obs_mode: rgb+depth+segmentation
   n_envs: 1
   max_steps: 400
