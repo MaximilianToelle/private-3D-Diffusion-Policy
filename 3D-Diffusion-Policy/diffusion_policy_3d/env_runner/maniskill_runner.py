@@ -312,10 +312,17 @@ if __name__ == "__main__":
             action = torch.rand((1, self.action_steps, self.action_dim), device=self.device)
             return {'action': action}
 
+    # Smoke test of the runner without a trained checkpoint.
+    #   default: random DummyPolicy on the config's task
+    #     python -m diffusion_policy_3d.env_runner.maniskill_runner
+    #   Fawad's motion-planning oracle (gsplat_envs) on the DynaGSLAM task; it emits joint targets,
+    #   so the task has to run in joint space:
+    #     python -m diffusion_policy_3d.env_runner.maniskill_runner --config-name wrist_cam_dynagslam_gsplat_dp3 \
+    #         task.representation_space=abs_joint_pos +test_policy=motion_planning
     @hydra.main(
         version_base=None,
         config_path="../config",
-        config_name="wrist_cam_dp3",
+        config_name="wrist_cam_dynagslam_gsplat_dp3",
     )
     def main(cfg):
         output_dir = "test_eval_output"
@@ -324,8 +331,22 @@ if __name__ == "__main__":
         env_runner: BaseRunner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=output_dir)
         assert isinstance(env_runner, BaseRunner)
 
-        action_dim = 8 if env_runner.representation_space == "abs_joint_pos" else 10
-        policy = DummyPolicy(action_dim=action_dim, action_steps=8, device=env_runner.device)
+        test_policy = cfg.get("test_policy", "dummy")
+        if test_policy == "dummy":
+            action_dim = 8 if env_runner.representation_space == "abs_joint_pos" else 10
+            policy = DummyPolicy(action_dim=action_dim, action_steps=8, device=env_runner.device)
+        elif test_policy == "motion_planning":
+            from gsplat_envs.mani_skill.motion_planning.franka.motionplanner_policy import CanStackMotionPlanningPolicy
+            assert env_runner.representation_space == "abs_joint_pos", \
+                "CanStackMotionPlanningPolicy emits joint targets: run with task.representation_space=abs_joint_pos"
+            # The obs wrapper is a gym.Env, so .unwrapped stops there; .env below it is the ManiSkill env.
+            policy = CanStackMotionPlanningPolicy(
+                env=env_runner.env.unwrapped.env,
+                action_steps=cfg.n_action_steps,
+                device=env_runner.device,
+            )
+        else:
+            raise ValueError(f"unknown test_policy '{test_policy}', expected 'dummy' or 'motion_planning'")
 
         runner_log_train = env_runner.run(policy)
         print("Log data:", runner_log_train)

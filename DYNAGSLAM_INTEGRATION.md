@@ -139,7 +139,9 @@ kept on purpose.
     the old two call sites (`True` from `reset()`, `False` from `step()`). A TODO marks that the resampling is
     still triggered twice on reset, by this flag and by `_gaussian_indices = None`, exactly as in the original.
 - **W4 depth in meters.** The old docstring said ManiSkill returns meters, the old code divided by 1000.
-  `depth_to_meters` decides by dtype (integer depth = millimeters) and is what every other wrapper here uses.
+  `depth_to_meters` converts the int16 millimeters every depth source here delivers and is what the other
+  wrappers use too. Negative depth and depth beyond `MAX_VALID_DEPTH_METERS` become 0, invalid; ManiSkill
+  saturates int16 at 32767 for pixels without geometry, so those are invalid as well.
 - **W5 `_subsample_gaussians`.** Two lines: `high_mask = opacities >= 0.98` → `>= self.min_opacity`, and the
   same in the docstring. `min_opacity` comes from `task.min_opacity` (0.98 in `maniskill_wrist_cam_gs_base`),
   so the value is the same. Everything else in the method is unchanged.
@@ -232,6 +234,11 @@ Found while checking the port; the port reproduces the original behaviour on pur
    Gaussians (robot links and movable actors); the DynaGSLAM observation is dominated by the table. Sampling
    from the dynamic cloud only (`Mapping.dyna_params`, or the last `get_dyna_num` rows) would match.
 3. **The opacity filter is a no-op:** `init_opacity: 0.99` ≥ `min_opacity: 0.98`.
+4. **A view without any mapped Gaussian fails inside DynaGSLAM's rasterizer.** `Mapping.temp_points_init`
+   renders the current map from the new camera; when no mapped Gaussian falls into the view (the debug line
+   reads `visible Gaussians: 0 / N`), the rasterizer launches with zero blocks and raises
+   `CUDA error: invalid configuration argument`. The runner's random dummy policy provokes it within about
+   20 policy calls by swinging the camera to the horizon; a policy early in training can do the same.
 
 ## Files
 
@@ -277,6 +284,18 @@ mapper in `gsplat_policy` fails on that rasterizer.
 conda activate gsplat_policy_dynagslam
 bash scripts/train_policy.sh wrist_cam_dynagslam_gsplat_dp3 maniskill_wrist_cam_dynagslam_stack <run_label> <seed> <gpu>
 ```
+
+Smoke tests without a checkpoint go through the runner's `__main__`, whose default config is this task.
+The random dummy policy, and Fawad's motion-planning oracle from `gsplat_envs`, which emits joint targets
+and therefore needs the joint-space representation:
+
+```bash
+python -m diffusion_policy_3d.env_runner.maniskill_runner task.env_runner.eval_episodes=1
+python -m diffusion_policy_3d.env_runner.maniskill_runner task.representation_space=abs_joint_pos +test_policy=motion_planning task.env_runner.eval_episodes=1
+```
+
+The oracle stacks the can in about 200 control steps (one episode takes about five minutes with DynaGSLAM)
+and writes `test_eval_output/eval_videos/*_success.mp4` next to the joint-position plots.
 
 The DynaGSLAM task has no dataset yet (`???` in the base, TODO in the leaf), so `train_policy.sh` stops at the
 dataset; for a training run on the gsplat data, copy the `dataset` block of the GSWorld leaf into the DynaGSLAM

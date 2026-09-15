@@ -11,36 +11,15 @@ import torch
 from pytorch3d.ops import sample_farthest_points
 
 
-MIN_PLAUSIBLE_DEPTH_METERS = 0.001
-MAX_PLAUSIBLE_DEPTH_METERS = 20.0
+MAX_VALID_DEPTH_METERS = 5.0   # farther pixels are invalid, like the FFS backend's beyond its 1.2 m
 
 
 def depth_to_meters(depth: torch.Tensor) -> torch.Tensor:
-    """Depth image -> float32 meters, using dtype and magnitude together, because
-    neither alone is sufficient: an integer dtype is always millimeters (ManiSkill
-    records int16 mm; metric depth in an int would be quantized to 0/1/2), while a
-    float dtype may hold either, so it falls back to magnitude (a robot workspace
-    is never 50 m deep). Raises if the converted range is not a plausible depth
-    image -- that means the two signals disagree and the guess would be wrong."""
-    depth_m = depth.to(torch.float32)
-    valid = depth_m > 0
-    if not valid.any():
-        return depth_m
-
-    max_raw = float(depth_m[valid].max())
-    is_millimeters = not depth.dtype.is_floating_point or max_raw > 20.0
-    if is_millimeters:
-        depth_m = depth_m / 1000.0
-
-    max_m = max_raw / 1000.0 if is_millimeters else max_raw
-    if not MIN_PLAUSIBLE_DEPTH_METERS <= max_m <= MAX_PLAUSIBLE_DEPTH_METERS:
-        raise ValueError(
-            f"depth_to_meters read {depth.dtype} as "
-            f"{'millimeters' if is_millimeters else 'meters'}, giving a max depth of "
-            f"{max_m:.4g} m (raw max {max_raw:.4g}), outside the plausible "
-            f"[{MIN_PLAUSIBLE_DEPTH_METERS}, {MAX_PLAUSIBLE_DEPTH_METERS}] m range. "
-            "The dtype and the magnitude disagree -- check the recorded depth unit."
-        )
+    """int16 millimeters, as ManiSkill, the FFS backend and the recordings all deliver, -> float32
+    meters. 0 marks an invalid pixel; negative depth and anything beyond MAX_VALID_DEPTH_METERS
+    (ManiSkill saturates int16 at 32767 for pixels without geometry) become invalid too."""
+    depth_m = depth.to(torch.float32) / 1000.0
+    depth_m[(depth_m < 0) | (depth_m > MAX_VALID_DEPTH_METERS)] = 0.0
     return depth_m
 
 
