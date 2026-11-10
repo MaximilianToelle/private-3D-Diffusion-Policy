@@ -1,7 +1,7 @@
 # Single source of truth for the spatial-memory point-cloud scene representation
 # (spatial_memory_pcd baseline).
 #
-# The dataset converter (scripts/dataset/conversion/convert_wrist_cam_gsworld_to_spatial_memory_pcd.py)
+# The dataset converter (scripts/dataset/conversion/convert_to_spatial_memory_pcd_memmap.py)
 # loads THIS file to build the mapper and stamps the effective values into the
 # zarr (meta.attrs["scene_representation"]). At training/eval the env-runner
 # builder composes THIS file (via the wrist_cam_spatial_memory_dp3 defaults list) and asserts
@@ -10,12 +10,15 @@
 # this file after converting therefore fails loudly: reconvert or revert.
 
 num_points: 1024            # what the policy consumes, sampled per training batch / live obs
-# The zarr stores the FULL deduped memory of every frame, padded to num_stored_points rows
-# and accompanied by a per-frame valid count. Farthest-point sampling down to num_points is a
-# separate step: the PointCloudFPS augmentation of the task config does it batched on the GPU
-# during training, and the observation wrapper does it per step at rollout. Conversion asserts
-# rather than truncates when a frame exceeds the cap, so no point is ever silently dropped.
-num_stored_points: 8000
+# The dataset stores, per frame, a farthest-point pool of this many points drawn once from the
+# full deduped memory (padded, with a per-frame valid count, while the memory is still smaller).
+# Farthest-point sampling down to num_points is a separate second stage: the PointCloudFPS
+# augmentation of the task config does it batched on the GPU during training, and the
+# observation wrapper runs both stages per step at rollout. Farthest-point sampling costs time
+# proportional to its input: on the full Fast-FoundationStereo memory of HangMugFr3WristCamEnv-v1
+# (~91k points per frame) one training batch took 669 ms, on this pool 12.5 ms, with the same
+# per-body composition of the final num_points sample (measured 2026-09-22). 98 KB per frame.
+num_pool_points: 8192
 
 # SpatialMemoryPcdSceneMapper params (baseline_scene_integration/spatial_memory_pcd_scene_mapper.py)
 # 0.004 guarantees the memory exceeds num_points from frame 0 of EVERY episode

@@ -9,12 +9,16 @@ Adding a new use case = adding a new builder here + a config pointing at it.
 """
 
 import argparse
+import json
 
 # NOTE: importing the gsworld wrappers appends GS_DIR to sys.path, which is what makes the
 # top-level `arguments` module importable — so this import MUST precede `from arguments ...`.
 from gsworld.mani_skill.utils.wrappers import WristCamGSWorldWrapper
 from arguments import PipelineParams
+from omegaconf import OmegaConf
 
+from gsplat_envs.mani_skill.sensors import depth_obs_key
+from diffusion_policy_3d.dataset.multi_memmap_dataset import dataset_attrs, discover_dataset_paths
 from diffusion_policy_3d.env.maniskill.observation_wrapper.gaussian_splatting.maniskill_wrist_cam_gs_wrapper import WristCamGSManiskillDP3Wrapper
 from diffusion_policy_3d.env.maniskill.observation_wrapper.pcd.maniskill_pcd_wrapper import SingleStepPCDManiSkillDP3Wrapper
 from diffusion_policy_3d.env.maniskill.observation_wrapper.pcd.maniskill_pcd_spatial_memory_wrapper import SpatialMemoryPCDManiSkillDP3Wrapper
@@ -61,7 +65,36 @@ def wrist_cam_online_gaussian_splatting(
     return env
 
 
-def pcd(
+def scene_representation_of_datasets(base_env, scene_representation, dataset_path) -> dict:
+    """The tripwire of the point-cloud heads: every dataset of the training run must have been
+    converted with the scene representation this rollout composes (the config file the converter
+    loaded and stamped, e.g. voxel size) and from the depth this env renders, since evaluating a
+    policy on a representation it was not trained on would be silently invalid. Returns the
+    composed scene representation as plain containers (json round-trip normalizes container
+    types on both sides)."""
+    composed = json.loads(json.dumps(OmegaConf.to_container(scene_representation, resolve=True)))
+    depth_key = depth_obs_key(base_env.unwrapped.depth_mode)
+    for path in discover_dataset_paths(dataset_path):
+        stored_attrs = dataset_attrs(path)
+        assert "scene_representation" in stored_attrs, (
+            f"{path} lacks a scene_representation stamp -- reconvert with the current converter.")
+        stored = json.loads(json.dumps(stored_attrs["scene_representation"]))
+        assert composed == stored, (
+            "scene_representation config does not match the one the dataset was "
+            f"converted with.\n  composed (config/scene_representation/*.yaml): {composed}\n"
+            f"  stored (stamp of {path}): {stored}\n"
+            "The dataset was recorded with the stored values -- evaluating with "
+            "different ones is invalid. Revert the yaml or reconvert the dataset."
+        )
+        assert stored_attrs["depth_key"] == depth_key, (
+            f"{path} was converted from '{stored_attrs['depth_key']}' but the env renders "
+            f"'{depth_key}' (depth_mode {base_env.unwrapped.depth_mode!r}) -- set the task's depth "
+            "to the one the dataset was converted from."
+        )
+    return composed
+
+
+def single_step_pcd(
     *,
     # injected by ManiSkillRunner
     base_env,
@@ -70,10 +103,13 @@ def pcd(
     representation_space,
     agent_proprio_dim,
     cam_name,
-    num_points,
+    scene_representation,
+    dataset_path,
 ):
     """
-    Point-cloud perception head.
+    Point-cloud perception head without memory: the current frame's cloud, sampled down to the
+    num_points of config/scene_representation/single_step_pcd.yaml (asserted against the
+    datasets' stamp like the spatial-memory head below).
 
     NOTE: relative_ee_pose is not yet supported for point clouds — RelativeEEControlWrapper
     only transforms gs_* keys, not 'point_cloud'.
@@ -83,15 +119,16 @@ def pcd(
             "relative_ee_pose is not yet implemented for the point-cloud representation: "
             "RelativeEEControlWrapper only transforms gs_* keys, not 'point_cloud'."
         )
+    composed = scene_representation_of_datasets(base_env, scene_representation, dataset_path)
 
-    env = SingleStepPCDManiSkillDP3Wrapper(
+    return SingleStepPCDManiSkillDP3Wrapper(
         base_env,
         representation_space,
         agent_proprio_dim=agent_proprio_dim,
         cam_name=cam_name,
-        num_points=num_points,
+        num_points=composed["num_points"],
+        device=device,
     )
-    return env
 
 
 def spatial_memory_pcd(
@@ -125,34 +162,11 @@ def spatial_memory_pcd(
             "RelativeEEControlWrapper only transforms gs_* keys, not 'point_cloud'."
         )
 
-    import json
-
-    from omegaconf import OmegaConf
-
     from diffusion_policy_3d.baseline_scene_integration.spatial_memory_pcd_scene_mapper import (
         SpatialMemoryPcdSceneMapper,
     )
 
-    from diffusion_policy_3d.dataset.multi_memmap_dataset import (
-        dataset_attrs, discover_dataset_paths)
-
-    # tripwire: composed config must equal what EVERY dataset of the training run was
-    # converted with (json round-trip normalizes container types on both sides).
-    composed = json.loads(json.dumps(OmegaConf.to_container(scene_representation, resolve=True)))
-    for path in discover_dataset_paths(dataset_path):
-        stored_attrs = dataset_attrs(path)
-        assert "scene_representation" in stored_attrs, (
-            f"{path} lacks a scene_representation stamp -- reconvert with the "
-            "current convert_wrist_cam_gsworld_to_spatial_memory_pcd_memmap.py."
-        )
-        stored = json.loads(json.dumps(stored_attrs["scene_representation"]))
-        assert composed == stored, (
-            "scene_representation config does not match the one the dataset was "
-            f"converted with.\n  composed (config/scene_representation/*.yaml): {composed}\n"
-            f"  stored (stamp of {path}): {stored}\n"
-            "The dataset was recorded with the stored values -- evaluating with "
-            "different ones is invalid. Revert the yaml or reconvert the dataset."
-        )
+    composed = scene_representation_of_datasets(base_env, scene_representation, dataset_path)
 
     scene_mapper = SpatialMemoryPcdSceneMapper(
         voxel_size=composed["voxel_size"],
@@ -166,9 +180,9 @@ def spatial_memory_pcd(
         agent_proprio_dim=agent_proprio_dim,
         cam_name=cam_name,
         scene_mapper=scene_mapper,
-        # num_points is not a mapper parameter: the mapper accumulates the full memory and the
-        # wrapper samples this many points out of it per step, with the same shared function
-        # the PointCloudFPS augmentation applies to every training batch.
+        # Not a mapper parameter: the mapper accumulates the full memory and the wrapper samples
+        # it down per step to the num_points the PointCloudFPS augmentation draws from every
+        # training batch.
         num_points=composed["num_points"],
     )
     return env

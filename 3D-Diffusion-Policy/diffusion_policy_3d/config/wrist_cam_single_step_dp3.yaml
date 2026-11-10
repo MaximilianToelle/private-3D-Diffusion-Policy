@@ -1,0 +1,7 @@
+defaults:
+  - dp3
+  - scene_representation: single_step_pcd
+  - override task: maniskill_wrist_cam_single_step_pcd_stack
+  - _self_
+
+name: train_wrist_cam_single_step_dp3

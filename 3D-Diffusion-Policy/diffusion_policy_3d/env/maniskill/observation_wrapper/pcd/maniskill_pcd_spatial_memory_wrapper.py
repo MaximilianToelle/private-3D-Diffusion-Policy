@@ -4,7 +4,7 @@ A *scene mapper* is the stateful reconstruction component of a baseline: it cons
 preprocessed camera frame at a time and maintains the scene representation the policy
 consumes, under the contract of baseline_scene_integration/base_scene_mapper.py. This wrapper
 receives one instead of constructing it, because the identical mapper also runs offline in
-scripts/dataset/conversion/convert_wrist_cam_gsworld_to_spatial_memory_pcd.py, which is not an
+scripts/dataset/conversion/convert_to_spatial_memory_pcd_memmap.py, which is not an
 environment. The online instance comes from env_runner/maniskill_env_obs_wrapper_builder.py,
 in spatial_memory_pcd -- see the architecture section of the repository README for the pattern
 and for the config-versus-dataset assert that construction site carries.
@@ -33,8 +33,12 @@ class SpatialMemoryPCDManiSkillDP3Wrapper(ManiSkillDP3BaseObsWrapper):
     a point cloud accumulated over the whole episode, written into
     ``obs_dict['point_cloud']`` at every step. The accumulation itself, meaning
     per-rigid-body re-posing and voxel dedup, lives in ``SpatialMemoryPcdSceneMapper``, and
-    the fixed-size cloud is drawn from that memory by the same ``farthest_point_downsample``
-    that the PointCloudFPS augmentation applies during training.
+    the fixed-size cloud is drawn from that memory by one deterministic farthest-point
+    sampling. That equals the dataset's deterministic path, the stored ``farthest_point_pool``
+    sampled down by PointCloudFPS without a random start: both greedy selections begin at the
+    same first point, so the pool's first ``num_points`` picks are exactly the direct picks, and
+    sampling the pool reproduces them (verified bit-identical on recorded frames). Skipping the
+    pool stage online saves the sampling of ~8k out of up to ~100k memory points per step.
 
     What stays here is everything SAPIEN-specific, which the mapper must not know about
     because its offline twin is fed GS semantic ids and FK / env_states poses instead:
@@ -108,14 +112,12 @@ class SpatialMemoryPCDManiSkillDP3Wrapper(ManiSkillDP3BaseObsWrapper):
             rigid_body_to_world_poses,
         )
 
-        # The memory itself has no fixed size, so it is sampled down here. The cloud is exactly
-        # as long as the memory, hence no lengths, and the sampling is deterministic so that
-        # repeated evaluations of one checkpoint on one seed see identical observations.
-        accumulated_cloud = self.scene_mapper.get_scene_representation(rigid_body_to_world_poses)
+        # The memory itself has no fixed size, so it is sampled down here, deterministically so
+        # that repeated evaluations of one checkpoint on one seed see identical observations.
         return {
             'point_cloud': farthest_point_downsample(
-                accumulated_cloud.unsqueeze(0), self.num_points,
-                random_start_point=False).squeeze(0),
+                self.scene_mapper.get_scene_representation(rigid_body_to_world_poses).unsqueeze(0),
+                self.num_points, random_start_point=False).squeeze(0),
         }
 
     def _reset_perception_state(self):

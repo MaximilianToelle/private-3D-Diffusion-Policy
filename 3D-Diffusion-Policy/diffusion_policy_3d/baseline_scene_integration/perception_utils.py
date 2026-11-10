@@ -9,6 +9,7 @@ from typing import List, Tuple
 
 import torch
 from pytorch3d.ops import sample_farthest_points
+from torch.nn.utils.rnn import pad_sequence
 
 
 MAX_VALID_DEPTH_METERS = 5.0   # farther pixels are invalid, like the FFS backend's beyond its 1.2 m
@@ -110,3 +111,35 @@ def farthest_point_downsample(points, num_points, lengths=None, random_start_poi
     sampled, _ = sample_farthest_points(points, lengths=lengths, K=num_points,
                                         random_start_point=random_start_point)
     return sampled
+
+
+def farthest_point_pool(points, num_pool_points):
+    """The stored superset of one accumulated memory: (N, 3) -> (min(N, num_pool_points), 3) by
+    deterministic farthest-point sampling, or the memory itself while it is smaller.
+
+    A frame's memory can hold 100k points and farthest-point sampling costs time proportional
+    to that count, so the converter stores this pool per frame instead of the full memory, and
+    the second stage samples num_points out of it: PointCloudFPS in training, the observation
+    wrapper at rollout. The wrapper runs both stages, so rollout observations follow the
+    dataset's distribution."""
+    if points.shape[0] <= num_pool_points:
+        return points
+    return farthest_point_downsample(points.unsqueeze(0), num_pool_points, random_start_point=False).squeeze(0)
+
+
+def farthest_point_pools(clouds: List[torch.Tensor], num_pool_points) -> List[torch.Tensor]:
+    """farthest_point_pool of many clouds in one call, for the converters: pytorch3d runs one CUDA
+    block per cloud, so a batch of clouds costs little more wall time than a single one, whereas
+    one call per cloud runs single blocks in sequence. Clouds larger than the pool are zero-padded
+    to a common length and sampled together, with ``lengths`` keeping the padding out; smaller
+    ones are returned unchanged. The result equals the per-cloud farthest_point_pool, since both
+    start the greedy selection at the first point."""
+    large = [index for index, cloud in enumerate(clouds) if cloud.shape[0] > num_pool_points]
+    pools = list(clouds)
+    if large:
+        padded = pad_sequence([clouds[index] for index in large], batch_first=True)
+        lengths = torch.tensor([clouds[index].shape[0] for index in large], device=padded.device)
+        sampled = farthest_point_downsample(padded, num_pool_points, lengths=lengths, random_start_point=False)
+        for row, index in enumerate(large):
+            pools[index] = sampled[row]
+    return pools

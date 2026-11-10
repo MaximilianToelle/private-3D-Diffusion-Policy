@@ -1,0 +1,21 @@
+# Single source of truth for the single-frame point-cloud scene representation
+# (single_step_pcd baseline: plain DP3 without memory).
+#
+# Same contract as spatial_memory_pcd.yaml: the dataset converter
+# (scripts/dataset/conversion/convert_to_single_step_pcd_memmap.py) loads THIS file and stamps
+# the effective values into the dataset, the env-runner builder composes THIS file at
+# training/eval and asserts it equals the stamp. Editing it after converting fails loudly:
+# reconvert or revert.
+#
+# The cloud is the current frame's depth backprojected and reduced to the tracked rigid bodies
+# (robot links and movable actors; table, ground and unlabeled pixels dropped), nothing is
+# accumulated over the episode.
+
+num_points: 1024            # what the policy consumes, sampled per training batch / live obs
+# Stored per frame: a farthest-point pool of this many of the frame's tracked points, or all of
+# them while there are fewer (padded, with a per-frame valid count). Sampling it down to
+# num_points is the same second stage as in the spatial-memory baseline, PointCloudFPS per
+# training batch and the observation wrapper per rollout step, so that the two baselines
+# differ in nothing but the memory. A frame of HangMugFr3WristCamEnv-v1 holds ~10k tracked
+# points, so the pool keeps most of them.
+num_pool_points: 8192

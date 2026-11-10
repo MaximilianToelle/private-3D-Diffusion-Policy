@@ -12,7 +12,7 @@ memory, whose size grows over the episode, and reducing it to the fixed number o
 consumes is a separate, explicit call to ``farthest_point_downsample`` of perception_utils.py.
 
 Its two callers are the offline converter
-(scripts/dataset/conversion/convert_wrist_cam_gsworld_to_spatial_memory_pcd.py) and the online
+(scripts/dataset/conversion/convert_to_spatial_memory_pcd_memmap.py) and the online
 observation wrapper, so neither the accumulation nor the reduction can diverge between the
 dataset a policy trains on and the observations it sees at rollout.
 """

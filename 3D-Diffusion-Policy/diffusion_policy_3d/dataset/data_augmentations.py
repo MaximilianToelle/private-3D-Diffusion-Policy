@@ -89,12 +89,12 @@ class PointCloudFPS:
 
     def __call__(self, batch):
         obs = batch['obs']
-        point_cloud = obs['point_cloud']                                # (B, T, num_stored_points, 3)
+        point_cloud = obs['point_cloud']                                # (B, T, num_pool_points, 3)
         num_valid_points = obs.pop('num_valid_points')                  # (B, T), not needed afterwards
-        B, T, num_stored_points, _ = point_cloud.shape
+        B, T, num_pool_points, _ = point_cloud.shape
 
         sampled = farthest_point_downsample(
-            point_cloud.reshape(B * T, num_stored_points, 3),
+            point_cloud.reshape(B * T, num_pool_points, 3),
             self.num_points,
             lengths=num_valid_points.reshape(B * T),                    # excludes the padding rows
             random_start_point=self.random_start_point,

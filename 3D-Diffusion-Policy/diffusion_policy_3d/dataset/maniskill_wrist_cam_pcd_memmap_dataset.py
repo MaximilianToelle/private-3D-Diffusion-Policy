@@ -1,21 +1,21 @@
-"""Dataset for the spatial_memory_pcd baseline, over the memmap dataset format.
+"""Dataset of the point-cloud baselines, over the memmap dataset format.
 
-Loads the memmap dataset(s) written by scripts/dataset/conversion/
-convert_wrist_cam_gsworld_to_spatial_memory_pcd_memmap.py (or repacked from a zarr by
-repack_zarr_dataset_to_memmap.py), which store each frame's FULL accumulated memory
-produced by the shared SpatialMemoryPcdSceneMapper, padded to a fixed row count and
+Loads the memmap dataset(s) written by scripts/dataset/conversion/convert_to_single_step_pcd_memmap.py
+(the current frame's cloud, single_step_pcd) or convert_to_spatial_memory_pcd_memmap.py (the
+cloud accumulated over the episode by the shared SpatialMemoryPcdSceneMapper, spatial_memory_pcd).
+Both store per frame a farthest-point pool of the representation, padded to the pool size and
 accompanied by num_valid_points, plus the proprio and action keys shared with the other
-converters. Several converted datasets are pooled through MultiMemmapDataset, since
-conversion runs as a job array producing one dataset per recording.
+converters. Several converted datasets are pooled through MultiMemmapDataset, since conversion
+runs as a job array producing one dataset per recording.
 
-The dataset hands the padded memory over unchanged, together with num_valid_points. Reducing
-it to the num_points the policy consumes is the job of the PointCloudFPS augmentation
-configured in the task, which runs batched on the GPU: farthest-point sampling of a single
-sample costs milliseconds on the CPU, which the dataloader workers cannot hide, whereas one
-call for the whole batch costs about as much on the GPU. Training draws a fresh subset every
-epoch, validation a fixed one, which the augmentation controls through random_start_point.
+The dataset hands the padded pool over unchanged, together with num_valid_points. Reducing it
+to the num_points the policy consumes is the job of the PointCloudFPS augmentation configured
+in the task, which runs batched on the GPU: farthest-point sampling of a single sample costs
+milliseconds on the CPU, which the dataloader workers cannot hide, whereas one call for the
+whole batch costs about as much on the GPU. Training draws a fresh subset every epoch,
+validation a fixed one, which the augmentation controls through random_start_point.
 
-Plain DP3 on abs_joint_pos only -- the pcd obs-wrapper builder rejects
+Plain DP3 on abs_joint_pos only -- the pcd obs-wrapper builders reject
 relative_ee_pose (RelativeEEControlWrapper only transforms gs_* keys).
 """
 
@@ -30,7 +30,7 @@ from diffusion_policy_3d.dataset.multi_memmap_dataset import MultiMemmapDataset
 from diffusion_policy_3d.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 
 
-class WristCamSpatialMemoryPCDMemmapManiskillDataset(MultiMemmapDataset):
+class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
     def __init__(self,
             dataset_path,
             horizon=1,
@@ -53,15 +53,15 @@ class WristCamSpatialMemoryPCDMemmapManiskillDataset(MultiMemmapDataset):
             num_train_episodes=num_train_episodes,
         )
 
-        # Datasets converted with different mapper params must not be mixed, for the reason the
-        # env-runner builder asserts the stamp against the composed config: the recorded clouds
-        # would come from different scene representations.
+        # Datasets converted with different scene-representation params must not be mixed, for
+        # the reason the env-runner builder asserts the stamp against the composed config: the
+        # recorded clouds would come from different scene representations.
         self.scene_representation = None
         for path, buf in zip(self.dataset_paths, self.replay_buffers):
             attrs = buf.root['meta']
             assert 'scene_representation' in attrs, (
                 f"{path} lacks a scene_representation stamp -- reconvert it with the "
-                "current convert_wrist_cam_gsworld_to_spatial_memory_pcd_memmap.py.")
+                "current converter.")
             if self.scene_representation is None:
                 self.scene_representation = attrs['scene_representation']
             assert attrs['scene_representation'] == self.scene_representation, (
@@ -169,7 +169,7 @@ class WristCamSpatialMemoryPCDMemmapManiskillDataset(MultiMemmapDataset):
         data = {
             'obs': {
                 # policy only consumes the first n_obs_steps of the horizon window.
-                # The memory is passed on with its padding, since PointCloudFPS reduces it to
+                # The pool is passed on with its padding, since PointCloudFPS reduces it to
                 # num_points on the GPU and needs num_valid_points as the per-cloud length.
                 'point_cloud': torch.from_numpy(sample['point_cloud'][:self.n_obs_steps].copy()),
                 'num_valid_points': torch.from_numpy(
@@ -196,6 +196,9 @@ if __name__ == "__main__":
 
     OmegaConf.register_new_resolver("eval", eval, replace=True)
 
+    # Smoke test on any point-cloud train config, e.g.
+    #   python -m diffusion_policy_3d.dataset.maniskill_wrist_cam_pcd_memmap_dataset \
+    #       --config-name wrist_cam_single_step_dp3
     @hydra.main(
         version_base=None,
         config_path="../config",
@@ -227,7 +230,7 @@ if __name__ == "__main__":
         batch = next(iter(train_dataloader))
         num_valid_points = batch['obs']['num_valid_points']
         print(f"Got test batch, point_cloud {tuple(batch['obs']['point_cloud'].shape)} holding "
-              f"{int(num_valid_points.min())}...{int(num_valid_points.max())} accumulated points. "
+              f"{int(num_valid_points.min())}...{int(num_valid_points.max())} stored points. "
               "Augmenting and normalizing...")
 
         batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
