@@ -88,7 +88,7 @@ class SpatialMemoryPCDManiSkillDP3Wrapper(ManiSkillDP3BaseObsWrapper):
         # ManiSkill batches sensor data over environments and a rollout runs a single one, so the
         # leading index drops that dimension and the trailing one the single depth channel. The
         # env records int16 millimeters, hence the shared conversion.
-        depth_m = depth_to_meters(obs["sensor_data"][self.cam]["depth"][0, ..., 0])
+        depth_m = depth_to_meters(obs["sensor_data"][self.cam][self.depth_key][0, ..., 0])
         segmentation = obs["sensor_data"][self.cam]["segmentation"][0, ..., 0]
         intrinsics = obs["sensor_param"][self.cam]["intrinsic_cv"][0]
         cam2world_cv = cam2world_cv_from_extrinsic_cv(

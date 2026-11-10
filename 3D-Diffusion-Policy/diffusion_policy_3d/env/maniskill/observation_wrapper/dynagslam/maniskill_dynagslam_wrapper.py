@@ -108,7 +108,7 @@ class DynaGSLAMManiSkillDP3Wrapper(ManiSkillDP3BaseObsWrapper):
         # ManiSkill batches sensor data over environments and a rollout runs a single one, so
         # the leading index drops that dimension and the trailing one the single depth channel.
         rgb = cam_data['rgb'][0]                                   # (H, W, 3) uint8
-        depth_m = depth_to_meters(cam_data['depth'][0, ..., 0])    # (H, W) float32 meters
+        depth_m = depth_to_meters(cam_data[self.depth_key][0, ..., 0])    # (H, W) float32 meters
         segmentation = cam_data['segmentation'][0, :, :, 0]        # (H, W) int
         intrinsics = cam_params['intrinsic_cv'][0]                 # (3, 3)
         cam2world_cv = cam2world_cv_from_extrinsic_cv(cam_params['extrinsic_cv'][0])

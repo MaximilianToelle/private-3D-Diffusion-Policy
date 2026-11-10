@@ -19,6 +19,8 @@ import gym
 from gym import spaces
 import torch
 
+from gsplat_envs.mani_skill.sensors import depth_obs_key
+
 
 class ManiSkillDP3BaseObsWrapper(gym.Env):
     def __init__(self, env, representation_space, agent_proprio_dim, render_cam_name):
@@ -28,6 +30,8 @@ class ManiSkillDP3BaseObsWrapper(gym.Env):
         self.representation_space = representation_space
         self.agent_proprio_dim = agent_proprio_dim
         self.render_cam_name = render_cam_name
+        # `depth` is always the ground truth; a depth_mode records its depth under its own key
+        self.depth_key = depth_obs_key(self.env.unwrapped.depth_mode)
         self._last_rgb = None
 
         # Action space: cast the underlying Gymnasium Box to a legacy Gym Box for DP3's wrapper math.

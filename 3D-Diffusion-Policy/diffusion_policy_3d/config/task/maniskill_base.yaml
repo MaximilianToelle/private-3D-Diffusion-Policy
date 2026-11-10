@@ -2,6 +2,10 @@ name: maniskill
 
 representation_space: relative_ee_pose     # abs_joint_pos | relative_ee_pose
 
+# Which depth the datasets were converted from and the rollouts use: gt (the simulator's) or
+# ffs (Fast-FoundationStereo). The obs-wrapper builders assert it against each dataset's depth_key.
+depth: gt
+
 shape_meta: &shape_meta
   obs:
     agent_proprio:
@@ -30,7 +34,9 @@ env_runner:
   control_freq: 20
   tqdm_interval_sec: 5.0
   device: cuda:0
-  depth_mode: null              # null (gt rasterizer) | fast_foundation_stereo
+  depth_mode: ${eval:'{"gt":None,"ffs":"fast_foundation_stereo"}["${task.depth}"]'}
+  shader: default               # default (rasterizer) | rt, the one the recordings were rendered with
+  sim_backend: cpu              # the recordings' physics (the gpu sim's camera group also fails with rt); policy and perception stay on `device`
 
 dataset:
   horizon: ${horizon}
