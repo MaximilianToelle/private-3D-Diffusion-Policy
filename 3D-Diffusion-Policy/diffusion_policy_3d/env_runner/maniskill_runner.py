@@ -2,7 +2,8 @@
 
   * The env's perception-specific wrappers are built by the `maniskill_env_obs_wrapper_builder`
     callable selected in config. Shared wrappers (video recording -> multi-step 
-    -> optional relative-EE control) are applied in `__init__`. 
+    -> optional relative-EE control) are applied in `_env`, which builds one env per value of the
+    task's env_kwargs (a rollout from a dataset episode uses that episode's recorded ones).
     The runner injects the shared runtime params (base_env, device, representation_space,
     n_obs_steps, n_action_steps); wrapper-specific params get defined in the config.
     -> For a new use case, add a new obs wrapper function + a config that points at it.
@@ -101,8 +102,8 @@ class ManiSkillRunner(BaseRunner):
 
         if depth_mode is not None:
             assert n_envs == 1, "swapped depth backends only support a single environment"
-        base_env = gymnasium.make(
-            task_name,
+        # the gymnasium.make arguments every env shares; the envs differ only in the task's env_kwargs
+        self.make_kwargs = dict(
             robot_uids=robot_uids,
             obs_mode=obs_mode,
             control_mode="pd_ee_pos_quat" if representation_space in ("relative_ee_pose", "abs_ee_pose") else "pd_joint_pos",
@@ -113,32 +114,42 @@ class ManiSkillRunner(BaseRunner):
             sensor_configs=dict(shader_pack=shader),
             human_render_camera_configs=dict(shader_pack=shader),
             depth_mode=depth_mode,
-            **dict(env_kwargs or {}),
         )
-
         # `maniskill_env_obs_wrapper_builder` is a functools.partial from hydra with
         # perception-specific params defined in the config
-        env = maniskill_env_obs_wrapper_builder(
-            base_env=base_env,
-            device=self.device,
-        )
+        self.maniskill_env_obs_wrapper_builder = maniskill_env_obs_wrapper_builder
+        self.n_obs_steps = n_obs_steps
+        self.n_action_steps = n_action_steps
+        self.max_steps = max_steps
 
-        env = AttentionOverlayWrapper(env)     # recolors the scene which gets captured in the recorded frames 
-        env = SimpleVideoRecordingWrapper(env)
-        env = MultiStepWrapper(
-            env,
-            n_obs_steps=n_obs_steps,
-            n_action_steps=n_action_steps,
-            max_episode_steps=max_steps,
-            reward_agg_method='sum',
-        )
-        if representation_space == "relative_ee_pose":
-            env = RelativeEEControlWrapper(env) # requires MultiStepWrapper underneath
-        self.env = env
+        # A rollout from a dataset episode runs in the env with that episode's recorded env_kwargs
+        # (e.g. its piece), one without in the env with the configured ones.
+        self.env_kwargs = dict(env_kwargs or {})
+        self.envs = {}
+        self.env = self._env(self.env_kwargs)
+
+    def _env(self, env_kwargs: dict):
+        """The wrapped env with these task env_kwargs, built on first use."""
+        key = tuple(sorted(env_kwargs.items()))
+        if key not in self.envs:
+            base_env = gymnasium.make(self.task_name, **self.make_kwargs, **env_kwargs)
+            env = self.maniskill_env_obs_wrapper_builder(base_env=base_env, device=self.device)
+            env = AttentionOverlayWrapper(env)     # recolors the scene which gets captured in the recorded frames
+            env = SimpleVideoRecordingWrapper(env)
+            env = MultiStepWrapper(
+                env,
+                n_obs_steps=self.n_obs_steps,
+                n_action_steps=self.n_action_steps,
+                max_episode_steps=self.max_steps,
+                reward_agg_method='sum',
+            )
+            if self.representation_space == "relative_ee_pose":
+                env = RelativeEEControlWrapper(env) # requires MultiStepWrapper underneath
+            self.envs[key] = env
+        return self.envs[key]
 
     def run(self, policy: BasePolicy, dataset=None, prefix: str = ""):
         policy_device = policy.device   # obs tensors must match the policy's weights, not the sim device
-        env = self.env
         self.rollout_dataset = dataset   # callbacks read the episodes and their split from it
 
         all_traj_rewards: List[float] = []
@@ -152,6 +163,7 @@ class ManiSkillRunner(BaseRunner):
                                      desc=f"Eval ManiSkill {self.task_name}",
                                      leave=False, mininterval=self.tqdm_interval_sec):
 
+            env = self.env
             init_state = None
             expert_trajectory = None
             if dataset is not None:
@@ -164,8 +176,9 @@ class ManiSkillRunner(BaseRunner):
                     "with val_ratio=0 and max_train_episodes unset nothing is held out for "
                     "validation, so pass dataset=None to roll out from random initial states")
                 # get_episode_init_data handles multi-buffer routing internally.
-                init_state, expert_trajectory = dataset.get_episode_init_data(
-                    valid_episode_indices[episode_idx % len(valid_episode_indices)])
+                episode = valid_episode_indices[episode_idx % len(valid_episode_indices)]
+                init_state, expert_trajectory = dataset.get_episode_init_data(episode)
+                env = self._env({key: dataset.episode_env_kwargs(episode)[key] for key in self.env_kwargs})
 
             obs = env.reset(options={'init_state': init_state} if init_state is not None else None)
             if not self._obs_shape_validated:
@@ -256,9 +269,9 @@ class ManiSkillRunner(BaseRunner):
             log_data["steps_p75"] = np.percentile(all_num_steps_to_success, 75)
         else:
             # Penalize with max horizon to visually indicate failure
-            log_data["steps_p25"] = env.max_episode_steps
-            log_data["steps_median"] = env.max_episode_steps
-            log_data["steps_p75"] = env.max_episode_steps
+            log_data["steps_p25"] = self.max_steps
+            log_data["steps_median"] = self.max_steps
+            log_data["steps_p75"] = self.max_steps
 
         for cb in self.callbacks:
             self._safe_callback(cb, "at_run_end", prefix=prefix, log_data=log_data)

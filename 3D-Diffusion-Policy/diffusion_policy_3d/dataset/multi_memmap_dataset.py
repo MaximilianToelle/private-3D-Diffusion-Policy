@@ -297,6 +297,14 @@ class MultiMemmapDataset(BaseDataset):
         end_idx = int(buf.episode_ends[local_ep_idx])
         return buf, start_idx, end_idx
 
+    def episode_env_kwargs(self, global_episode_idx) -> dict:
+        """The env kwargs the episode was recorded with, stamped into its dataset by the converter."""
+        buf_idx, _ = self._global_episode_to_local(global_episode_idx)
+        attrs = dataset_attrs(self.dataset_paths[buf_idx])
+        assert 'env_kwargs' in attrs, \
+            f"{self.dataset_paths[buf_idx]} lacks the env_kwargs stamp -- reconvert with the current converter"
+        return attrs['env_kwargs']
+
     # =====================================================================
     # Validation dataset
     # =====================================================================

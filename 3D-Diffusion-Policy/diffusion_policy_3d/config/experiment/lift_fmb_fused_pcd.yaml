@@ -20,5 +20,5 @@ data:
   # (unseen rotations); needs num_train_episodes: null
   held_out_start_yaw_deg: null
   # one of dataset_path: validate on all its episodes, train on all episodes of the others
-  # (an unseen piece, so task.piece must be its piece); needs num_train_episodes: null
+  # (an unseen piece); needs num_train_episodes: null
   held_out_dataset_path: null
