@@ -1,0 +1,43 @@
+# Shared part of the point-cloud scene representations (single_step_pcd, spatial_memory_pcd,
+# fused_pcd_*). A representation adds its name, its params and its observation-wrapper builder.
+# NOTE: an inheritance parent, never selected directly as `scene_representation=`.
+
+# The depth the datasets were converted from and the rollouts use: gt (the simulator's) or ffs
+# (Fast-FoundationStereo). The obs-wrapper builders assert it against each dataset's depth_key.
+depth: gt
+obs_mode: rgb+depth+segmentation   # rgb for the evaluation videos
+
+# The policy's observation of the scene.
+shape_meta:
+  point_cloud:
+    shape:
+      - ${scene_representation.params.num_points}
+      - 3
+    type: point_cloud
+obs_key_aliases: {}
+
+dataset:
+  _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_pcd_memmap_dataset.WristCamPCDMemmapManiskillDataset
+
+# Builds the perception wrappers of the evaluation env; the env_runner injects base_env and device.
+obs_wrapper_builder:
+  _target_: ???   # …maniskill_env_obs_wrapper_builder.single_step_pcd | .spatial_memory_pcd | .fused_pcd
+  _partial_: true
+  representation_space: ${policy.representation_space}
+  agent_proprio_dim: ${proprio_shape_meta.agent_proprio.shape[0]}
+  scene_representation: ${scene_representation.params}
+  dataset_path: ${data.dataset_path}
+
+# The dataset hands over the stored point pool of every observation step; reducing it to
+# num_points happens here, batched on the GPU (~10 ms per batch, against ~0.7 s when the
+# dataloader workers sample each cloud on the CPU).
+train_data_augmentations:
+  - _target_: diffusion_policy_3d.dataset.data_augmentations.PointCloudFPS
+    num_points: ${scene_representation.params.num_points}
+    random_start_point: true   # a different subset of the same pool in every epoch
+val_data_augmentations:
+  - _target_: diffusion_policy_3d.dataset.data_augmentations.PointCloudFPS
+    num_points: ${scene_representation.params.num_points}
+    random_start_point: false  # one fixed subset, so the val loss stays comparable
+
+callbacks: []

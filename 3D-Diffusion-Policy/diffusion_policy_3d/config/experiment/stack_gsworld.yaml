@@ -1,0 +1,15 @@
+# @package _global_
+# (an experiment sets keys at the top level of the config, like base.yaml)
+# GSplatDP3 on GSWorld's Gaussians, on the stack task.
+defaults:
+  - /base
+  - /task: stack
+  - /scene_representation: gsworld
+  - /policy: gsplat_dp3
+  - _self_
+
+name: stack_gsworld
+
+data:
+  dataset_path:
+    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_1_positions_surf_normals_opacities_active_gaussians_mask_semantics

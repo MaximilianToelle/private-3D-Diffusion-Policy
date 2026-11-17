@@ -1,0 +1,11 @@
+# The whole scene within a 1 m x 1 m x 1.5 m box in front of the robot (table, robot, piece), from
+# 1 cm below the table top, so the piece holds a small share of the points. The robot base sits
+# on the box's back face.
+defaults:
+  - fused_pcd
+  - _self_
+
+name: fused_pcd_sparse
+
+params:
+  crop_box: [[0.0, -0.5, -0.01], [1.0, 0.5, 1.5]]

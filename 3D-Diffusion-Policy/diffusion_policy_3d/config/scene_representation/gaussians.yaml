@@ -1,0 +1,70 @@
+# Shared part of the Gaussian scene representations (gsworld, dynagslam): the gs_* observations.
+# NOTE: an inheritance parent, never selected directly as `scene_representation=`.
+
+# The depth the rollouts use: gt (the simulator's) or ffs (Fast-FoundationStereo).
+depth: gt
+obs_mode: rgb+depth+segmentation
+
+num_gaussians: 1024
+min_opacity: 0.98
+
+# The policy's observation of the scene.
+shape_meta:
+  gs_positions:
+    shape:
+      - ${scene_representation.num_gaussians}
+      - 3
+    type: spatial
+  point_cloud:            # aliased to gs_positions at eval (obs_key_aliases)
+    shape:
+      - ${scene_representation.num_gaussians}
+      - 3
+    type: spatial
+  gs_rotations_9d:
+    shape:
+      - ${scene_representation.num_gaussians}
+      - 9
+    type: spatial
+  gs_surface_normals:
+    shape:
+      - ${scene_representation.num_gaussians}
+      - 3
+    type: spatial
+  gs_log_scales:
+    shape:
+      - ${scene_representation.num_gaussians}
+      - 3
+    type: spatial
+  gs_opacities:
+    shape:
+      - ${scene_representation.num_gaussians}
+      - 1
+    type: spatial
+  gs_rgb:
+    shape:
+      - ${scene_representation.num_gaussians}
+      - 3
+    type: spatial
+
+# For running the pcd baseline on Gaussian means
+obs_key_aliases:
+  point_cloud: gs_positions
+
+dataset:
+  _target_: ???
+  representation_space: ${policy.representation_space}
+  min_opacity: ${scene_representation.min_opacity}
+  num_gaussians: ${scene_representation.num_gaussians}
+  # relative_ee_pose percentile stats: histogram over anchor-relative positions.
+  # bin width = 2 * range / num_bins = 1.4e-6 m. Do NOT override per sweep -- the same
+  # estimator constants across all runs are what keeps normalizations comparable.
+  percentile_histogram_range: 3.0
+  percentile_histogram_num_bins: ${eval:'2 ** 22'}
+
+# GPU augmentations from dataset/data_augmentations.py, chained in sequence; none needed:
+# WristCamGSMemmapManiskillDataset does the active+high-opacity filter and the downsampling to
+# num_gaussians on the cpu.
+train_data_augmentations: []
+val_data_augmentations: []
+
+callbacks: []

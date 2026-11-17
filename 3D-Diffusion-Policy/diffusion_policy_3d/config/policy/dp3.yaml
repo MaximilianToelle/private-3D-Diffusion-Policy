@@ -1,0 +1,20 @@
+# DP3: a PointNet encoder of the point cloud conditions the diffusion U-Net.
+defaults:
+  - diffusion_unet
+  - _self_
+
+# The frame of the policy's proprio, actions and scene: abs_joint_pos (joint positions, scene in
+# the robot base frame) | relative_ee_pose (tcp pose relative to the current tcp, scene in the
+# current tcp frame). The point-cloud observation wrappers support abs_joint_pos only.
+representation_space: abs_joint_pos
+
+network:
+  _target_: diffusion_policy_3d.policy.dp3.DP3
+  use_pc_color: false
+  pointnet_type: "pointnet"
+  pointcloud_encoder_cfg:
+    in_channels: 3
+    out_channels: ${policy.network.encoder_output_dim}
+    use_layernorm: true
+    final_norm: layernorm # layernorm, none
+    normal_channel: false

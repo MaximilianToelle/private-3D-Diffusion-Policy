@@ -1,6 +1,5 @@
 defaults:
   - base_dp3
-  - override task: maniskill_stack
   - _self_
 
 name: train_dp3

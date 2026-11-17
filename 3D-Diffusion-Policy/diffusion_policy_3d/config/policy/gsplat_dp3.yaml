@@ -1,30 +1,32 @@
+# GSplatDP3: an encoder of the Gaussians' parameters conditions the diffusion U-Net.
 defaults:
-  - base_dp3
-  - override task: maniskill_wrist_cam_gsworld_stack
+  - diffusion_unet
   - _self_
 
-name: train_gsplat_dp3
+# The frame of the policy's proprio, actions and scene: abs_joint_pos (joint positions, scene in
+# the robot base frame) | relative_ee_pose (tcp pose relative to the current tcp, scene in the
+# current tcp frame).
+representation_space: relative_ee_pose
 
-policy:
+network:
   _target_: diffusion_policy_3d.policy.gsplat_dp3.GSplatDP3
-  encoder_output_dim: 128     # 128
   use_state_features: true
 
   # Gaussian Splatting parameters
   gsplat_encoder_cfg:
     encoder_type: raw_concat               # Options: latent_concat, raw_concat
-    
+
     # ── Config for latent_concat (projection mlps for params) ──
-    param_keys_feature_dims: # defines which param groups to encode to which feature dim 
-      gs_positions: 64         
+    param_keys_feature_dims: # defines which param groups to encode to which feature dim
+      gs_positions: 64
       gs_rotations_9d: 0       # 0 disables (previously 64)
-      gs_surface_normals: 64    
-      gs_log_scales: 0         
-      gs_opacities: 0          
-      gs_rgb: 0                
+      gs_surface_normals: 64
+      gs_log_scales: 0
+      gs_opacities: 0
+      gs_rgb: 0
 
     # ── Config for raw_concat (which parameters to use) ──
-    raw_keys:         
+    raw_keys:
       - gs_positions
     #   - gs_surface_normals
 
@@ -32,4 +34,4 @@ policy:
     use_layernorm: true                     # in backbone
     use_projection: true                    # projection to out_channels
     final_norm: layernorm                   # within projection
-    out_channels: ${policy.encoder_output_dim}    
+    out_channels: ${policy.network.encoder_output_dim}

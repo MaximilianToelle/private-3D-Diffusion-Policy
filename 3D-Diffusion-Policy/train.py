@@ -34,7 +34,9 @@ from diffusion_policy_3d.model.diffusion.ema_model import EMAModel
 from diffusion_policy_3d.model.common.lr_scheduler import get_scheduler
 
 
-OmegaConf.register_new_resolver("eval", eval, replace=True)
+from diffusion_policy_3d.common.config_resolvers import register_config_resolvers
+
+register_config_resolvers()
 
 class TrainDP3Workspace:
     include_keys = ['global_step', 'epoch']
@@ -53,23 +55,23 @@ class TrainDP3Workspace:
         random.seed(seed)
 
         # configure model
-        if cfg.policy._target_ == "diffusion_policy_3d.policy.dp3.DP3":
-            self.model: DP3 = hydra.utils.instantiate(cfg.policy)
-        elif cfg.policy._target_ == "diffusion_policy_3d.policy.gsplat_dp3.GSplatDP3":
-            self.model: GSplatDP3 = hydra.utils.instantiate(cfg.policy)
-        elif cfg.policy._target_ == "diffusion_policy_3d.policy.mindmap_dp3.MindmapDP3":
+        if cfg.policy.network._target_ == "diffusion_policy_3d.policy.dp3.DP3":
+            self.model: DP3 = hydra.utils.instantiate(cfg.policy.network)
+        elif cfg.policy.network._target_ == "diffusion_policy_3d.policy.gsplat_dp3.GSplatDP3":
+            self.model: GSplatDP3 = hydra.utils.instantiate(cfg.policy.network)
+        elif cfg.policy.network._target_ == "diffusion_policy_3d.policy.mindmap_dp3.MindmapDP3":
             # from diffusion_policy_3d.policy.mindmap_dp3 import MindmapDP3
-            # self.model: MindmapDP3 = hydra.utils.instantiate(cfg.policy)
-            raise ValueError(f"Integration not yet finished for {cfg.policy._target_}")
+            # self.model: MindmapDP3 = hydra.utils.instantiate(cfg.policy.network)
+            raise ValueError(f"Integration not yet finished for {cfg.policy.network._target_}")
         else:
-            raise ValueError(f"Unknown policy target: {cfg.policy._target_}")
+            raise ValueError(f"Unknown policy target: {cfg.policy.network._target_}")
 
         self.ema_model: DP3 = None
         if cfg.training.use_ema:
             try:
                 self.ema_model = copy.deepcopy(self.model)
             except Exception: # minkowski engine could not be copied. recreate it
-                self.ema_model = hydra.utils.instantiate(cfg.policy)
+                self.ema_model = hydra.utils.instantiate(cfg.policy.network)
 
         # configure training state
         # Policies may define their own parameter grouping (e.g. MindmapDP3
@@ -106,8 +108,8 @@ class TrainDP3Workspace:
             cfg.training.sample_every = 1
             RUN_ROLLOUT = True
             verbose = True
-            cfg.task.env_runner.eval_episodes = 2
-            cfg.task.dataset.num_train_episodes = 5
+            cfg.env_runner.eval_episodes = 2
+            cfg.data.num_train_episodes = 5
         else:
             RUN_ROLLOUT = True
             verbose = False
@@ -116,7 +118,7 @@ class TrainDP3Workspace:
         
         # configure dataset
         dataset: BaseDataset
-        dataset = hydra.utils.instantiate(cfg.task.dataset)
+        dataset = hydra.utils.instantiate(cfg.dataset)
         assert isinstance(dataset, BaseDataset), f"dataset must be BaseDataset, got {type(dataset)}"
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         normalizer = dataset.get_normalizer()
@@ -165,14 +167,14 @@ class TrainDP3Workspace:
                 self.epoch += 1
 
         # configure GPU augmentations
-        if 'train_data_augmentations' in cfg.task and cfg.task.train_data_augmentations is not None:
-            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.train_data_augmentations]
+        if cfg.scene_representation.get('train_data_augmentations') is not None:
+            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.scene_representation.train_data_augmentations]
             self.train_data_augmentations = GaussianCompose(augmentations)
         else:
             raise ValueError("Train data augmentations must be explicitly provided in the dataset config!")
             
-        if 'val_data_augmentations' in cfg.task and cfg.task.val_data_augmentations is not None:
-            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.val_data_augmentations]
+        if cfg.scene_representation.get('val_data_augmentations') is not None:
+            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.scene_representation.val_data_augmentations]
             self.val_data_augmentations = GaussianCompose(augmentations)
         else:
             raise ValueError("Eval data augmentations must be explicitly provided in the dataset config!")
@@ -200,7 +202,7 @@ class TrainDP3Workspace:
         # configure env
         env_runner: BaseRunner
         env_runner = hydra.utils.instantiate(
-            cfg.task.env_runner,
+            cfg.env_runner,
             output_dir=self.output_dir)
 
         if env_runner is not None:
@@ -488,13 +490,13 @@ class TrainDP3Workspace:
         # configure env
         env_runner: BaseRunner
         env_runner = hydra.utils.instantiate(
-            cfg.task.env_runner,
+            cfg.env_runner,
             output_dir=self.output_dir)
         assert isinstance(env_runner, BaseRunner)
         
         dataset = None
         if use_dataset:
-            dataset = hydra.utils.instantiate(cfg.task.dataset)
+            dataset = hydra.utils.instantiate(cfg.dataset)
             assert isinstance(dataset, BaseDataset)
             val_dataset = dataset.get_validation_dataset()
 

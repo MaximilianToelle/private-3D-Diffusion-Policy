@@ -1,0 +1,27 @@
+# Gaussians from GSWorld's pre-scanned assets of the scene, rendered online.
+defaults:
+  - gaussians
+  - _self_
+
+name: gsworld
+
+params: {}   # no converter stamp: the dataset checks min_opacity against its own attrs
+
+dataset:
+  _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_gs_memmap_dataset.WristCamGSMemmapManiskillDataset
+
+# Builds the perception wrappers of the evaluation env; the env_runner injects base_env and device.
+obs_wrapper_builder:
+  _target_: diffusion_policy_3d.env_runner.maniskill_env_obs_wrapper_builder.wrist_cam_online_gaussian_splatting
+  _partial_: true
+  representation_space: ${policy.representation_space}
+  agent_proprio_dim: ${proprio_shape_meta.agent_proprio.shape[0]}
+  n_obs_steps: ${policy.n_obs_steps}
+  n_action_steps: ${policy.n_action_steps}
+  scene_gs_cfg_name: ${task.gsworld_scene}
+  num_gaussians: ${scene_representation.num_gaussians}
+  min_opacity: ${scene_representation.min_opacity}
+  use_gsplat_viewer: false
+
+callbacks:
+  - _target_: diffusion_policy_3d.env_runner.maniskill_callbacks.GaussianAttentionPlotCallback

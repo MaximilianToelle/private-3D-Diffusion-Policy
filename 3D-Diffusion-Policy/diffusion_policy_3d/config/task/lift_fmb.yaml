@@ -1,0 +1,12 @@
+# Lift an FMB piece from the table (LiftFmbObjectFr3Env-v1). The piece is chosen at launch:
+# task.piece=hexagon_large_h100 (FmbObject.name).
+
+piece: ???
+env_id: LiftFmbObjectFr3Env-v1
+env_kwargs:
+  piece: ${task.piece}
+max_steps: 200   # the env's own limit; the demonstrations take 102-120 steps
+shader: default  # sensor cameras: default (rasterizer) | rt, the one the recordings were rendered with
+callbacks:
+  - _target_: diffusion_policy_3d.env_runner.maniskill_callbacks.GraspDeviationCallback
+    actor_name: piece

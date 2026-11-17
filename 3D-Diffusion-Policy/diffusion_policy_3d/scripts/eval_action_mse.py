@@ -40,7 +40,9 @@ from diffusion_policy_3d.dataset.base_dataset import BaseDataset
 from diffusion_policy_3d.dataset.data_augmentations import GaussianCompose
 from diffusion_policy_3d.common.pytorch_util import dict_apply
 
-OmegaConf.register_new_resolver("eval", eval, replace=True)
+from diffusion_policy_3d.common.config_resolvers import register_config_resolvers
+
+register_config_resolvers()
 
 
 def evaluate_action_mse(checkpoint_path: str, dataset_path: str, 
@@ -62,16 +64,16 @@ def evaluate_action_mse(checkpoint_path: str, dataset_path: str,
 
     # ── Configure dataset ──
     if dataset_path is not None:
-        cfg.task.dataset.dataset_path = dataset_path
-    dataset: BaseDataset = hydra.utils.instantiate(cfg.task.dataset)
+        cfg.data.dataset_path = dataset_path
+    dataset: BaseDataset = hydra.utils.instantiate(cfg.dataset)
     assert isinstance(dataset, BaseDataset)
     normalizer = dataset.get_normalizer()
-    cprint(f"Dataset loaded: {len(dataset)} samples from {cfg.task.dataset.dataset_path}", "cyan")
+    cprint(f"Dataset loaded: {len(dataset)} samples from {cfg.data.dataset_path}", "cyan")
     cprint(f"Training episodes: {np.nonzero(dataset.global_train_mask)[0].tolist()}", "cyan")
 
     # ── Configure augmentations (train augmentations to model training distribution) ──
-    if 'train_data_augmentations' in cfg.task and cfg.task.train_data_augmentations is not None:
-        augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.train_data_augmentations]
+    if cfg.scene_representation.get('train_data_augmentations') is not None:
+        augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.scene_representation.train_data_augmentations]
         train_data_augmentations = GaussianCompose(augmentations)
     else:
         raise ValueError("Train data augmentations must be explicitly provided in the dataset config!")

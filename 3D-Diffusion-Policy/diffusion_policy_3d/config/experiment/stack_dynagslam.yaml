@@ -1,0 +1,12 @@
+# @package _global_
+# (an experiment sets keys at the top level of the config, like base.yaml)
+# GSplatDP3 on DynaGSLAM's online Gaussians, on the simple stack task. No DynaGSLAM dataset exists
+# yet, so the data stays ???: rollouts only (README.md, DynaGSLAM).
+defaults:
+  - /base
+  - /task: stack_simple
+  - /scene_representation: dynagslam
+  - /policy: gsplat_dp3
+  - _self_
+
+name: stack_dynagslam

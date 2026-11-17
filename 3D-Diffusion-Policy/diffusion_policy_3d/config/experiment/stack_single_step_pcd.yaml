@@ -1,0 +1,12 @@
+# @package _global_
+# (an experiment sets keys at the top level of the config, like base.yaml)
+# DP3 on the wrist camera's current point cloud, without memory, on the stack task.
+# No stack dataset is converted for this scene representation yet, so the data stays ???.
+defaults:
+  - /base
+  - /task: stack
+  - /scene_representation: single_step_pcd
+  - /policy: dp3
+  - _self_
+
+name: stack_single_step_pcd

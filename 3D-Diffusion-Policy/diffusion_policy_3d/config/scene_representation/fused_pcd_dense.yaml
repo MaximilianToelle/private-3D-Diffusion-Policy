@@ -1,0 +1,10 @@
+# The Franka hand and the piece only, by ground-truth segmentation, so the piece holds a large
+# share of the points.
+defaults:
+  - fused_pcd
+  - _self_
+
+name: fused_pcd_dense
+
+params:
+  segmented_robot_links: [fr3_hand, fr3_leftfinger, fr3_rightfinger]

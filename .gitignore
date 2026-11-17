@@ -45,3 +45,6 @@ easytrain.sh
 nohup.out
 output/
 *.mp4
+
+# output of the env runner smoke test (python -m diffusion_policy_3d.env_runner.maniskill_runner)
+test_eval_output/

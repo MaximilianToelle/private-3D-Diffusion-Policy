@@ -16,7 +16,9 @@ import pathlib
 from train import TrainDP3Workspace
 from hydra.core.hydra_config import HydraConfig
 
-OmegaConf.register_new_resolver("eval", eval, replace=True)
+from diffusion_policy_3d.common.config_resolvers import register_config_resolvers
+
+register_config_resolvers()
     
 
 @hydra.main(
@@ -29,7 +31,7 @@ def main(cfg):
     
     # Detect if we should use dataset by checking if dataset path was overridden
     overrides = HydraConfig.get().overrides.task
-    use_dataset = any(o.startswith('task.dataset.dataset_path=') for o in overrides)
+    use_dataset = any(o.startswith('data.dataset_path=') for o in overrides)
 
     # Resolve checkpoint path from Hydra output dir without constructing the full workspace
     output_dir = pathlib.Path(HydraConfig.get().runtime.output_dir)
@@ -42,7 +44,7 @@ def main(cfg):
     workspace = TrainDP3Workspace.create_from_checkpoint(path=str(ckpt_path))
     
     if use_dataset:
-        workspace.cfg.task.dataset.dataset_path = cfg.task.dataset.dataset_path
+        workspace.cfg.data.dataset_path = cfg.data.dataset_path
         
     # Override output_dir so eval artifacts go to the right place
     workspace._output_dir = str(output_dir)
@@ -60,6 +62,6 @@ if __name__ == "__main__":
     
     # If path is provided, append it as a native Hydra config override
     if args.use_dataset is not None:
-        sys.argv.append(f'task.dataset.dataset_path={args.use_dataset}')
+        sys.argv.append(f'data.dataset_path={args.use_dataset}')
         
     main()

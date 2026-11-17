@@ -1,0 +1,7 @@
+# The stack task with start poses randomized within 1 cm instead of 5-10 cm (StackFr3WristCamSimpleEnv-v1).
+
+env_id: StackFr3WristCamSimpleEnv-v1
+env_kwargs: {}
+max_steps: 400   # the env's own limit
+shader: default   # sensor cameras: default (rasterizer) | rt, the one the recordings were rendered with
+callbacks: []

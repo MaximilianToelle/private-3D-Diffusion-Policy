@@ -1,0 +1,171 @@
+# Settings every experiment shares, and the place where the parts of an experiment meet.
+#
+# An experiment (experiment/*.yaml) picks one file of each group
+#   task/                  the ManiSkill env: env id, piece, max_steps, shader, its callbacks
+#   scene_representation/  what the policy sees and how: the parameters stamped into the dataset,
+#                          depth source, cameras, observation-wrapper builder, dataset class,
+#                          point sampling, its callbacks
+#   policy/                the network, its frame (representation_space), horizon, obs/action steps
+# and sets its name and its data (data.dataset_path, the train/validation split).
+#
+# Every value is defined in exactly one file. The nodes the code builds from (dataset, shape_meta,
+# env_runner) are assembled below from references, so this file shows where each of their entries
+# comes from. ${merge:a,b} (registered in train.py) joins two dictionaries and fails if both
+# define the same key.
+
+name: ???         # the experiment's name: run name and output folder
+exp_name: debug   # wandb group
+
+# The data an experiment trains on: dataset_path and the split are set by the experiment.
+data:
+  dataset_path: ???
+  # Validation is ALWAYS every episode that is not trained on, for the validation loss and the
+  # validation rollouts alike, so the two are never measured on different episodes.
+  #   num_train_episodes: K    -> train on K seeded-random episodes, validate on ALL others.
+  #     Single-trajectory training therefore validates against the whole rest of the dataset.
+  #     Asking for more episodes than the dataset holds is an error, never a silent cap.
+  #   num_train_episodes: null -> train on every episode: no validation loss, no validation
+  #     rollout.
+  num_train_episodes: null
+  seed: 42
+  # the policy's windows over an episode
+  horizon: ${policy.horizon}
+  n_obs_steps: ${policy.n_obs_steps}
+  pad_before: ${eval:'${policy.n_obs_steps}-1'}
+  pad_after: ${eval:'${policy.n_action_steps}-1'}
+
+# The scene representation's dataset class with its own arguments, reading the data above.
+dataset: ${merge:${data},${scene_representation.dataset}}
+
+# The policy's inputs and outputs: proprio and action in the policy's frame, and the scene
+# representation's observations.
+proprio_shape_meta:
+  agent_proprio:
+    shape:
+      - ${eval:'{"relative_ee_pose":11,"abs_joint_pos":9}["${policy.representation_space}"]'}
+    type: low_dim
+shape_meta:
+  obs: ${merge:${proprio_shape_meta},${scene_representation.shape_meta}}
+  action:
+    shape:
+      - ${eval:'{"relative_ee_pose":10,"abs_joint_pos":8}["${policy.representation_space}"]'}
+
+env_runner:
+  _target_: diffusion_policy_3d.env_runner.maniskill_runner.ManiSkillRunner
+  # the task
+  task_name: ${task.env_id}
+  env_kwargs: ${task.env_kwargs}
+  max_steps: ${task.max_steps}
+  shader: ${task.shader}
+  task_callbacks: ${task.callbacks}
+  # the scene representation
+  obs_mode: ${scene_representation.obs_mode}
+  depth_mode: ${eval:'{"gt":None,"ffs":"fast_foundation_stereo"}["${scene_representation.depth}"]'}
+  maniskill_env_obs_wrapper_builder: ${scene_representation.obs_wrapper_builder}
+  obs_key_aliases: ${scene_representation.obs_key_aliases}
+  scene_representation_callbacks: ${scene_representation.callbacks}
+  # the policy
+  representation_space: ${policy.representation_space}
+  agent_proprio_dim: ${proprio_shape_meta.agent_proprio.shape[0]}
+  n_obs_steps: ${policy.n_obs_steps}
+  n_action_steps: ${policy.n_action_steps}
+  # the evaluation protocol, the same for every experiment
+  eval_episodes: 20
+  robot_uids: fr3_umi_wrist_zedxmini   # the only registered wrist-cam robot since the ZED X Mini migration
+  n_envs: 1
+  sim_freq: 100
+  control_freq: 20
+  sim_backend: cpu   # the recordings' physics (the gpu sim's camera group also fails with rt); policy and perception stay on `device`
+  device: cuda:0
+  tqdm_interval_sec: 5.0
+  callbacks:
+    - _target_: diffusion_policy_3d.env_runner.maniskill_callbacks.VideoSavingCallback
+    - _target_: diffusion_policy_3d.env_runner.maniskill_callbacks.TrajectoryPlotCallback
+      representation_space: ${policy.representation_space}
+
+ema:
+  _target_: diffusion_policy_3d.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 128
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+  prefetch_factor: 4
+  drop_last: True
+
+val_dataloader:
+  batch_size: 128
+  num_workers: 8
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+  prefetch_factor: 4
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: True
+  lr_scheduler: constant       # constant, constant_with_warmup, cosine
+  lr_warmup_steps: 3600      # 1% of training -> 90 traj, 180 gradient steps per epoch, 2000 epochs
+  num_epochs: 2000
+  gradient_accumulate_every: 1
+  grad_clip_norm: 1.0         # max_norm for clip_grad_norm_; set to null to disable gradient clipping
+  use_ema: True
+  use_torch_compile: True
+  torch_compile_mode: max-autotune        # training compile mode
+  eval_torch_compile_mode: default        # eval compile mode (shorter run; keep warmup cheap)
+  rollout_every: 200
+  checkpoint_every: ${training.rollout_every}  # checkpoint.topk.monitor_key requires validation rollouts during same epoch!
+  val_every: 200
+  sample_every: 200
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+logging:
+  group: ${exp_name}
+  id: null
+  mode: online
+  name: "${name}-${training.seed}"
+  project: dp3
+  resume: true
+  tags:
+  - dp3
+
+checkpoint:
+  save_ckpt: False # if True, save checkpoint every checkpoint_every
+  topk:
+    monitor_key: val_mean_success_rates
+    mode: max
+    k: 1
+    format_str: 'epoch={epoch:04d}-val_mean_success_rates={val_mean_success_rates:.3f}.ckpt'
+  save_last_ckpt: True # this only saves when save_ckpt is True
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}
+    subdir: ${hydra.job.num}

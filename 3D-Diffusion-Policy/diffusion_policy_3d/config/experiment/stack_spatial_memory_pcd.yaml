@@ -1,0 +1,12 @@
+# @package _global_
+# (an experiment sets keys at the top level of the config, like base.yaml)
+# DP3 on the wrist camera's points accumulated over the episode, on the stack task.
+# No stack dataset is converted for this scene representation yet, so the data stays ???.
+defaults:
+  - /base
+  - /task: stack
+  - /scene_representation: spatial_memory_pcd
+  - /policy: dp3
+  - _self_
+
+name: stack_spatial_memory_pcd
