@@ -58,7 +58,9 @@ class ManiSkillRunner(BaseRunner):
         self,
         output_dir,
         maniskill_env_obs_wrapper_builder: Callable,
-        callbacks: Optional[List[EvalCallback]] = None,
+        callbacks: Optional[List[EvalCallback]] = None,                       # the shared ones (base.yaml)
+        scene_representation_callbacks: Optional[List[EvalCallback]] = None,  # the scene representation's
+        task_callbacks: Optional[List[EvalCallback]] = None,                  # the task's
         obs_key_aliases: Optional[Dict[str, str]] = None,
         eval_episodes: int = 20,
         tqdm_interval_sec: float = 5.0,
@@ -77,6 +79,7 @@ class ManiSkillRunner(BaseRunner):
         depth_mode: str = None,     # None (gt) | fast_foundation_stereo, the depth the datasets were converted from
         shader: str = "default",    # sensor cameras: default (rasterizer) | rt | rt-med | rt-fast, as recorded
         sim_backend: str = "cpu",   # physics: cpu | gpu (the cpu sim is what the recordings are made on)
+        env_kwargs: Optional[dict] = None,  # further arguments of the task's env, e.g. the piece of LiftFmbObjectFr3Env-v1
     ):
         super().__init__(output_dir)
         
@@ -91,7 +94,9 @@ class ManiSkillRunner(BaseRunner):
         self.tqdm_interval_sec = tqdm_interval_sec
         self.device = device
         
-        self.callbacks: List[EvalCallback] = list(callbacks) if callbacks is not None else []
+        # each owner contributes its own callbacks; their hooks run in this order
+        self.callbacks: List[EvalCallback] = [
+            *(scene_representation_callbacks or []), *(callbacks or []), *(task_callbacks or [])]
         self.obs_key_aliases: Dict[str, str] = dict(obs_key_aliases) if obs_key_aliases is not None else {}
 
         if depth_mode is not None:
@@ -108,6 +113,7 @@ class ManiSkillRunner(BaseRunner):
             sensor_configs=dict(shader_pack=shader),
             human_render_camera_configs=dict(shader_pack=shader),
             depth_mode=depth_mode,
+            **dict(env_kwargs or {}),
         )
 
         # `maniskill_env_obs_wrapper_builder` is a functools.partial from hydra with
@@ -133,6 +139,7 @@ class ManiSkillRunner(BaseRunner):
     def run(self, policy: BasePolicy, dataset=None, prefix: str = ""):
         policy_device = policy.device   # obs tensors must match the policy's weights, not the sim device
         env = self.env
+        self.rollout_dataset = dataset   # callbacks read the episodes and their split from it
 
         all_traj_rewards: List[float] = []
         all_success_rates: List[float] = []
@@ -148,16 +155,17 @@ class ManiSkillRunner(BaseRunner):
             init_state = None
             expert_trajectory = None
             if dataset is not None:
-                # Pick a random episode from the global train/val mask.
+                # The episodes of the global train/val mask in order, cycling when eval_episodes
+                # exceeds them, so every evaluation starts from the same states.
                 # NOTE: global_train_mask is set to the val_mask in the validation dataset.
                 valid_episode_indices = np.where(dataset.global_train_mask)[0]
                 assert len(valid_episode_indices) > 0, (
                     "the dataset holds no episodes to draw rollout initial states from -- "
                     "with val_ratio=0 and max_train_episodes unset nothing is held out for "
                     "validation, so pass dataset=None to roll out from random initial states")
-                random_episode_idx = np.random.choice(valid_episode_indices)
                 # get_episode_init_data handles multi-buffer routing internally.
-                init_state, expert_trajectory = dataset.get_episode_init_data(random_episode_idx)
+                init_state, expert_trajectory = dataset.get_episode_init_data(
+                    valid_episode_indices[episode_idx % len(valid_episode_indices)])
 
             obs = env.reset(options={'init_state': init_state} if init_state is not None else None)
             if not self._obs_shape_validated:
@@ -283,7 +291,9 @@ if __name__ == "__main__":
     import torch.nn as nn
     from omegaconf import OmegaConf
 
-    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    from diffusion_policy_3d.common.config_resolvers import register_config_resolvers
+
+    register_config_resolvers()
 
     class DummyExtractor:
         def __init__(self):
@@ -321,18 +331,18 @@ if __name__ == "__main__":
     #     python -m diffusion_policy_3d.env_runner.maniskill_runner
     #   Fawad's motion-planning oracle (gsplat_envs) on the DynaGSLAM task; it emits joint targets,
     #   so the task has to run in joint space:
-    #     python -m diffusion_policy_3d.env_runner.maniskill_runner --config-name wrist_cam_dynagslam_gsplat_dp3 \
-    #         task.representation_space=abs_joint_pos +test_policy=motion_planning
+    #     python -m diffusion_policy_3d.env_runner.maniskill_runner --config-name experiment/stack_dynagslam \
+    #         policy.representation_space=abs_joint_pos +test_policy=motion_planning
     @hydra.main(
         version_base=None,
         config_path="../config",
-        config_name="wrist_cam_dynagslam_gsplat_dp3",
+        config_name="experiment/stack_dynagslam",
     )
     def main(cfg):
         output_dir = "test_eval_output"
         os.makedirs(output_dir, exist_ok=True)
 
-        env_runner: BaseRunner = hydra.utils.instantiate(cfg.task.env_runner, output_dir=output_dir)
+        env_runner: BaseRunner = hydra.utils.instantiate(cfg.env_runner, output_dir=output_dir)
         assert isinstance(env_runner, BaseRunner)
 
         test_policy = cfg.get("test_policy", "dummy")
@@ -342,7 +352,7 @@ if __name__ == "__main__":
         elif test_policy == "motion_planning":
             from gsplat_envs.mani_skill.motion_planning.franka.motionplanner_policy import CanStackMotionPlanningPolicy
             assert env_runner.representation_space == "abs_joint_pos", \
-                "CanStackMotionPlanningPolicy emits joint targets: run with task.representation_space=abs_joint_pos"
+                "CanStackMotionPlanningPolicy emits joint targets: run with policy.representation_space=abs_joint_pos"
             # The obs wrapper is a gym.Env, so .unwrapped stops there; .env below it is the ManiSkill env.
             policy = CanStackMotionPlanningPolicy(
                 env=env_runner.env.unwrapped.env,

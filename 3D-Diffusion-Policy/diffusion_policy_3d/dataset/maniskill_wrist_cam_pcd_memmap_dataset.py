@@ -10,7 +10,7 @@ runs as a job array producing one dataset per recording.
 
 The dataset hands the padded pool over unchanged, together with num_valid_points. Reducing it
 to the num_points the policy consumes is the job of the PointCloudFPS augmentation configured
-in the task, which runs batched on the GPU: farthest-point sampling of a single sample costs
+in the scene representation, which runs batched on the GPU: farthest-point sampling of a single sample costs
 milliseconds on the CPU, which the dataloader workers cannot hide, whereas one call for the
 whole batch costs about as much on the GPU. Training draws a fresh subset every epoch,
 validation a fixed one, which the augmentation controls through random_start_point.
@@ -39,6 +39,7 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
             pad_after=0,
             seed=42,
             num_train_episodes=None,
+            held_out_start_yaw_deg=None,
             ):
         # Opens one memmap-backed replay buffer and one sampler per dataset (point_cloud is
         # (T, N, 3) f32, read through the OS page cache), splits train/val globally over all
@@ -51,6 +52,7 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
             pad_after=pad_after,
             seed=seed,
             num_train_episodes=num_train_episodes,
+            held_out_start_yaw_deg=held_out_start_yaw_deg,
         )
 
         # Datasets converted with different scene-representation params must not be mixed, for
@@ -76,7 +78,9 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
 
     def get_episode_init_data(self, global_episode_idx):
         """Init state + expert trajectory of one episode, used by the env runner to
-        reproduce dataset initial conditions for rollouts."""
+        reproduce dataset initial conditions for rollouts. The expert trajectory holds per step
+        the joint positions (agent_proprio), the tcp pose, the gripper action and every moving
+        actor's pose."""
         replay_buffer, start_idx, end_idx = self._episode_frame_range(global_episode_idx)
 
         # np.array copies, since indexing a memmap returns read-only views of the file
@@ -84,7 +88,12 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
             'actor_poses': {k: np.array(replay_buffer[k][start_idx]) for k in self.actor_keys},
             'agent_pos': np.array(replay_buffer['joint_pos_proprio'][start_idx]),
         }
-        expert_trajectory = np.array(replay_buffer['joint_pos_proprio'][start_idx:end_idx])
+        expert_trajectory = {
+            'agent_proprio': np.array(replay_buffer['joint_pos_proprio'][start_idx:end_idx]),
+            'tcp_pose': np.array(replay_buffer['tcp_pose_proprio'][start_idx:end_idx]),
+            'gripper_action': np.array(replay_buffer['joint_pos_action'][start_idx:end_idx, -1]),
+            'actor_poses': {k: np.array(replay_buffer[k][start_idx:end_idx]) for k in self.actor_keys},
+        }
         return init_state, expert_trajectory
 
     def get_normalizer(self, **kwargs):
@@ -194,19 +203,21 @@ if __name__ == "__main__":
     from diffusion_policy_3d.common.pytorch_util import dict_apply
     from diffusion_policy_3d.dataset.data_augmentations import GaussianCompose
 
-    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    from diffusion_policy_3d.common.config_resolvers import register_config_resolvers
 
-    # Smoke test on any point-cloud train config, e.g.
+    register_config_resolvers()
+
+    # Smoke test on any point-cloud experiment, e.g.
     #   python -m diffusion_policy_3d.dataset.maniskill_wrist_cam_pcd_memmap_dataset \
-    #       --config-name wrist_cam_single_step_dp3
+    #       --config-name experiment/stack_single_step_pcd
     @hydra.main(
         version_base=None,
         config_path="../config",
-        config_name="wrist_cam_spatial_memory_dp3"
+        config_name="experiment/stack_spatial_memory_pcd"
     )
     def main(cfg):
         dataset: BaseDataset
-        dataset = hydra.utils.instantiate(cfg.task.dataset)
+        dataset = hydra.utils.instantiate(cfg.dataset)
         assert isinstance(dataset, BaseDataset), f"dataset must be BaseDataset, got {type(dataset)}"
         print(f"Dataset instantiated. Length: {len(dataset)}")
 
@@ -217,9 +228,9 @@ if __name__ == "__main__":
         # train.py requires both lists, so instantiate them the same way instead of tolerating
         # their absence -- a config that fails here would fail at the start of training too.
         train_data_augmentations = GaussianCompose(
-            [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.train_data_augmentations])
+            [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.scene_representation.train_data_augmentations])
         val_data_augmentations = GaussianCompose(
-            [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.val_data_augmentations])
+            [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.scene_representation.val_data_augmentations])
 
         # =========================================================
         # Test normalization, on an augmented batch, since that is what the policy receives

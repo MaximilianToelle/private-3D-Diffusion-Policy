@@ -85,6 +85,60 @@ def backproject_to_world(
     return pts_world, per_pixel_labels[valid]
 
 
+GL_TO_CV_AXES = (1.0, -1.0, -1.0)  # OpenGL camera axes (x right, y up, z back) -> OpenCV (x right, y down, z forward)
+
+
+def fuse_cameras_with_normals(depths_m, normals_gl, segmentations, intrinsics, cam2worlds_cv):
+    """Backproject several cameras into one world-frame cloud. Per camera: depth (H, W) in meters,
+    0 invalid; the renderer's unit surface normal (H, W, 3) in the OpenGL camera frame, as
+    ManiSkill's normal texture delivers it; segmentation (H, W); intrinsic (3, 3) and
+    cam2world_cv (4, 4). Returns points (P, 3), unit normals (P, 3) and labels (P,) of all
+    valid pixels."""
+    points, normals, labels = [], [], []
+    for depth_m, normal_gl, segmentation, intrinsic, cam2world_cv in zip(depths_m, normals_gl, segmentations, intrinsics, cam2worlds_cv):
+        camera_points, camera_labels = backproject_to_world(depth_m, intrinsic, cam2world_cv, segmentation)
+        normal_cv = normal_gl[depth_m > 0] * normal_gl.new_tensor(GL_TO_CV_AXES)
+        points.append(camera_points)
+        normals.append(torch.nn.functional.normalize(normal_cv @ cam2world_cv[:3, :3].T.to(normal_cv.dtype), dim=-1))
+        labels.append(camera_labels)
+    return torch.cat(points), torch.cat(normals), torch.cat(labels)
+
+
+def voxel_downsample_nearest_to_center(points, voxel_size):
+    """Indices of one point per occupied voxel: the one nearest to the voxel center. The kept
+    points are measured ones, not averages, so whatever is indexed with them (normals, labels)
+    stays exact."""
+    voxel_coordinates = points / voxel_size
+    voxel_corners = torch.floor(voxel_coordinates)
+    distance_to_center = ((voxel_coordinates - voxel_corners - 0.5) ** 2).sum(dim=-1)
+    _, voxel_index = torch.unique(voxel_corners.long(), dim=0, return_inverse=True)
+    nearest_first = torch.argsort(distance_to_center)
+    grouped = nearest_first[torch.argsort(voxel_index[nearest_first], stable=True)]
+    first_of_voxel = torch.ones_like(grouped, dtype=torch.bool)
+    first_of_voxel[1:] = voxel_index[grouped[1:]] != voxel_index[grouped[:-1]]
+    return grouped[first_of_voxel]
+
+
+def fused_pcd(depths_m, normals_gl, segmentations, intrinsics, cam2worlds_cv, is_body, scene_representation, generator=None):
+    """One frame of the fused_pcd_dense / fused_pcd_sparse representation
+    (config/scene_representation/fused_pcd.yaml), for the converter and the observation wrapper:
+    the cameras fused (fuse_cameras_with_normals), the points selected, one point per voxel and a
+    uniform random subset of at most num_pool_points. Without a crop_box the selected points are
+    those whose segmentation label is_body (bool lookup by label) marks. Returns points (N, 3)
+    and unit normals (N, 3)."""
+    points, normals, labels = fuse_cameras_with_normals(depths_m, normals_gl, segmentations, intrinsics, cam2worlds_cv)
+    crop_box = scene_representation["crop_box"]
+    if crop_box is None:
+        selected = is_body[labels]
+    else:
+        box = points.new_tensor(crop_box)
+        selected = ((points >= box[0]) & (points <= box[1])).all(dim=-1)
+    points, normals = points[selected], normals[selected]
+    kept = voxel_downsample_nearest_to_center(points, scene_representation["voxel_size"])
+    kept = kept[torch.randperm(len(kept), generator=generator, device=kept.device)[:scene_representation["num_pool_points"]]]
+    return points[kept], normals[kept]
+
+
 def farthest_point_downsample(points, num_points, lengths=None, random_start_point=True):
     """Reduce every cloud of ``points`` (B, N, 3) to exactly (B, num_points, 3) by
     farthest-point sampling.

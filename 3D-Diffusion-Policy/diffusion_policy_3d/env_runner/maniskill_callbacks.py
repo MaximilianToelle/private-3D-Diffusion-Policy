@@ -130,17 +130,16 @@ class VideoSavingCallback(EvalCallback):
     the buffer, which is guaranteed because it lives in `at_episode_end`.
 
     Requires `SimpleVideoRecordingWrapper` in the env stack (enforced via `_find_wrapper`).
+    The wrapper captures one frame per control step, so playing the video at the control frequency
+    shows it in real time. The Gaussian-attention colorbar legend is appended below the frames
+    whenever a `GaussianAttentionPlotCallback` runs, the only case the frames are colored by
+    attention.
 
     Args:
-        fps: playback frame rate of the saved video.
-        add_attention_legend: append the Gaussian-attention colorbar legend below the
-            frames. Only meaningful together with `GaussianAttentionPlotCallback`.
         colormap: matplotlib colormap name for the legend.
     """
 
-    def __init__(self, fps: int = 10, add_attention_legend: bool = False, colormap: str = 'cool'):
-        self.fps = fps
-        self.add_attention_legend = add_attention_legend
+    def __init__(self, colormap: str = 'cool'):
         self.colormap = colormap
 
     def at_episode_end(self, runner, *, episode_idx, is_success, prefix, env, expert_trajectory, info):
@@ -149,12 +148,12 @@ class VideoSavingCallback(EvalCallback):
         video_dir = os.path.join(runner.output_dir, "eval_videos")
         os.makedirs(video_dir, exist_ok=True)
         video_to_save = video.transpose(0, 2, 3, 1)  # (T, H, W, C)
-        if self.add_attention_legend:
+        if any(isinstance(callback, GaussianAttentionPlotCallback) for callback in runner.callbacks):
             video_to_save = add_legend_to_video(video_to_save, colormap=self.colormap)
 
         suffix = "success" if is_success else "failure"
         out_path = os.path.join(video_dir, f"{prefix}_ep_{episode_idx}_{suffix}.mp4")
-        imageio.mimsave(out_path, video_to_save, fps=self.fps, macro_block_size=1)
+        imageio.mimsave(out_path, video_to_save, fps=_find_env_attr(runner.env, "control_freq"), macro_block_size=1)
         cprint(f"Saved evaluation video to {out_path}", "cyan")
 
 
@@ -260,7 +259,7 @@ class TrajectoryPlotCallback(EvalCallback):
 
     def at_episode_end(self, runner, *, episode_idx, is_success, prefix, env, expert_trajectory, info):
         traj_agent_proprio = _find_wrapper(env, MultiStepWrapper).traj_agent_proprio
-        self.all_expert_trajectories.append(expert_trajectory)
+        self.all_expert_trajectories.append(expert_trajectory['agent_proprio'])
         self.all_policy_trajectories.append(torch.stack(list(traj_agent_proprio)).cpu().numpy())
         self.all_predicted_actions.append(np.array(self.current_predicted_actions))
 
@@ -299,6 +298,126 @@ class TrajectoryPlotCallback(EvalCallback):
                 save_path=tcp_state_path,
             )
             cprint(f"Saved TCP State plot to {tcp_state_path}", "cyan")
+
+
+# ---------------------------------------------------------------------------
+# Grasp deviation from the demonstration
+# ---------------------------------------------------------------------------
+def _pose_matrix(pose7):
+    """[x, y, z, qw, qx, qy, qz] -> (4, 4)."""
+    matrix = np.eye(4)
+    matrix[:3, :3] = Rotation.from_quat(np.asarray(pose7[3:7])[[1, 2, 3, 0]]).as_matrix()
+    matrix[:3, 3] = pose7[:3]
+    return matrix
+
+
+def _pose_change(pose_from, pose_to):
+    """Translation [mm] and rotation angle [deg] between two (4, 4) poses."""
+    delta = np.linalg.inv(pose_from) @ pose_to
+    return 1000 * np.linalg.norm(delta[:3, 3]), np.degrees(Rotation.from_matrix(delta[:3, :3]).magnitude())
+
+
+def _yaw_deg(pose7):
+    """Yaw of a pose rotated about z only, in [-180, 180)."""
+    return (np.degrees(2 * np.arctan2(pose7[6], pose7[3])) + 180) % 360 - 180
+
+
+class GraspDeviationCallback(EvalCallback):
+    """How far the policy's grasp is from the demonstration of the same start state, and how
+    much the actor moves in the hand afterwards, next to the same for the demonstration.
+
+    Every rollout starts from a dataset episode's start state, so that episode's demonstration
+    is the oracle's grasp for exactly this start. The grasp moment is the first step whose
+    gripper action drops below 0 (the demonstrations ramp it from 1, open, to -1, closed, while
+    the tcp stands still). The policy's poses are read at the end of the action chunk holding
+    that step, k steps after it, so the demonstration is read k steps after its own first
+    closing step:
+      grasp error    tcp pose of the policy vs the demonstration at that moment
+      in-hand slip   change of the actor's pose in the tcp frame from that moment to the last
+                     step of the rollout (of the demonstration, for the reference)
+    Logs median / p5 / p95 / max of the policy's metrics and how many rollouts closed the
+    gripper, and plots every rollout over the actor's start yaw, with the start yaws of the
+    training episodes as ticks.
+
+    Requires a dataset whose expert trajectory holds tcp_pose, gripper_action and actor_poses
+    (WristCamPCDMemmapManiskillDataset).
+    """
+
+    METRICS = ['grasp_position_error_mm', 'grasp_rotation_error_deg', 'slip_translation_mm', 'slip_rotation_deg']
+    POLICY_COLOR, DEMONSTRATION_COLOR, TICK_COLOR = '#2a78d6', '#eb6834', '#9a9a96'
+
+    def __init__(self, actor_name: str):
+        self.actor_name = actor_name
+        self.actor_key = f'actor_pose_{actor_name}'
+        self.rollouts: List[dict] = []
+
+    def at_run_start(self, runner, policy):
+        self.rollouts = []
+
+    def before_episode_start_after_env_reset(self, runner, *, episode_idx, init_state, expert_trajectory):
+        self.demonstration = expert_trajectory
+        self.start_yaw = _yaw_deg(init_state['actor_poses'][self.actor_key])
+        self.grasp = None
+
+    def after_action_predict(self, runner, *, obs_dict, action, action_dict, policy, env):
+        self.chunk_gripper_actions = action[:, -1].cpu().numpy()
+        self.steps_before_chunk = len(_find_wrapper(env, MultiStepWrapper).traj_agent_proprio) - 1
+
+    def _tcp_and_actor_pose(self, env):
+        return (_pose_matrix(_find_env_attr(env, "agent").tcp.pose.raw_pose[0].cpu().numpy()),
+                _pose_matrix(_find_env_attr(env, "scene").actors[self.actor_name].pose.raw_pose[0].cpu().numpy()))
+
+    def _demonstration_tcp_and_actor_pose(self, step):
+        return (_pose_matrix(self.demonstration['tcp_pose'][step]),
+                _pose_matrix(self.demonstration['actor_poses'][self.actor_key][step]))
+
+    def after_env_step(self, runner, *, obs, action, reward, done, info, policy, env):
+        if self.grasp is not None:
+            return
+        executed = len(_find_wrapper(env, MultiStepWrapper).traj_agent_proprio) - 1 - self.steps_before_chunk
+        closing = np.flatnonzero(self.chunk_gripper_actions[:executed] < 0)
+        if len(closing) == 0:
+            return
+        steps_since_closing = executed - closing[0]
+        demonstration_closing = int(np.flatnonzero(self.demonstration['gripper_action'] < 0)[0])
+        demonstration_step = min(demonstration_closing + steps_since_closing, len(self.demonstration['tcp_pose']) - 1)
+        self.grasp = dict(policy=self._tcp_and_actor_pose(env),
+                          demonstration=self._demonstration_tcp_and_actor_pose(demonstration_step))
+
+    def at_episode_end(self, runner, *, episode_idx, is_success, prefix, env, expert_trajectory, info):
+        rollout = dict(start_yaw=self.start_yaw, is_success=is_success, closed=self.grasp is not None)
+        if self.grasp is not None:
+            (policy_tcp, policy_actor), (demonstration_tcp, demonstration_actor) = self.grasp['policy'], self.grasp['demonstration']
+            policy_tcp_end, policy_actor_end = self._tcp_and_actor_pose(env)
+            demonstration_tcp_end, demonstration_actor_end = self._demonstration_tcp_and_actor_pose(-1)
+            rollout['grasp_position_error_mm'], rollout['grasp_rotation_error_deg'] = _pose_change(demonstration_tcp, policy_tcp)
+            rollout['slip_translation_mm'], rollout['slip_rotation_deg'] = _pose_change(
+                np.linalg.inv(policy_tcp) @ policy_actor, np.linalg.inv(policy_tcp_end) @ policy_actor_end)
+            rollout['demonstration_slip_translation_mm'], rollout['demonstration_slip_rotation_deg'] = _pose_change(
+                np.linalg.inv(demonstration_tcp) @ demonstration_actor,
+                np.linalg.inv(demonstration_tcp_end) @ demonstration_actor_end)
+        self.rollouts.append(rollout)
+
+    def at_run_end(self, runner, *, prefix, log_data):
+        closed = [rollout for rollout in self.rollouts if rollout['closed']]
+        log_data['grasp_num_closed'] = len(closed)
+        log_data['grasp_num_never_closed'] = len(self.rollouts) - len(closed)
+        for metric in self.METRICS:
+            values = np.array([rollout[metric] for rollout in closed])
+            if len(values) > 0:
+                log_data[f'{metric}_median'] = np.median(values)
+                log_data[f'{metric}_p5'], log_data[f'{metric}_p95'] = np.percentile(values, [5, 95])
+                log_data[f'{metric}_max'] = values.max()
+
+        dataset = runner.rollout_dataset
+        training_start_yaws = dataset.episode_start_yaws_deg()[dataset.training_episode_mask]
+        plot_dir = os.path.join(runner.output_dir, "eval_plots")
+        os.makedirs(plot_dir, exist_ok=True)
+        plot_path = os.path.join(plot_dir, f"{prefix}_grasp_deviation.png")
+        save_grasp_deviation_plot(closed, training_start_yaws, self.POLICY_COLOR, self.DEMONSTRATION_COLOR, self.TICK_COLOR,
+                                  title=f"{prefix}: {len(closed)} of {len(self.rollouts)} rollouts closed the gripper",
+                                  save_path=plot_path)
+        cprint(f"Saved grasp deviation plot to {plot_path}", "cyan")
 
 
 # ===========================================================================
@@ -644,3 +763,39 @@ def add_legend_to_video(video_frames, colormap='cool'):
 
     # Concatenate vertically
     return np.concatenate([video_frames, colorbar_video], axis=1)
+
+
+def save_grasp_deviation_plot(rollouts, training_start_yaws, policy_color, demonstration_color, tick_color, title, save_path):
+    """One panel per metric over the actor's start yaw: the policy's rollouts (x = failed), the
+    demonstrations' slip as the reference, the training episodes' start yaws as ticks."""
+    panels = [('grasp_position_error_mm', 'grasp position error [mm]'),
+              ('grasp_rotation_error_deg', 'grasp rotation error [deg]'),
+              ('slip_translation_mm', 'in-hand slip, translation [mm]'),
+              ('slip_rotation_deg', 'in-hand slip, rotation [deg]')]
+    fig, axes = plt.subplots(2, 2, figsize=(11, 7), sharex=True)
+    for ax, (metric, label) in zip(axes.flat, panels):
+        for is_success, marker in ((True, 'o'), (False, 'x')):
+            subset = [rollout for rollout in rollouts if rollout['is_success'] == is_success]
+            ax.scatter([rollout['start_yaw'] for rollout in subset], [rollout[metric] for rollout in subset],
+                       marker=marker, s=40, color=policy_color, linewidths=1.5,
+                       label=f"policy, {'success' if is_success else 'failure'}")
+        if metric.startswith('slip'):
+            ax.scatter([rollout['start_yaw'] for rollout in rollouts], [rollout[f'demonstration_{metric}'] for rollout in rollouts],
+                       marker='s', s=40, facecolors='none', edgecolors=demonstration_color, linewidths=1.5,
+                       label='demonstration (reference)')
+        ax.plot(training_start_yaws, np.zeros_like(training_start_yaws), '|', markersize=10, color=tick_color,
+                transform=ax.get_xaxis_transform(), label='training start yaws')
+        ax.set_ylabel(label)
+        ax.set_ylim(bottom=0)
+        ax.grid(True, color='#e6e6e3', linewidth=0.8)
+        ax.set_axisbelow(True)
+        for side in ('top', 'right'):
+            ax.spines[side].set_visible(False)
+    for ax in axes[1]:
+        ax.set_xlabel('start yaw [deg]')
+    handles, labels = axes[1, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', ncol=len(labels), frameon=False)
+    fig.suptitle(title)
+    fig.tight_layout(rect=(0, 0.05, 1, 1))
+    fig.savefig(save_path, dpi=120)
+    plt.close(fig)

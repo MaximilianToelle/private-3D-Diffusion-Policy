@@ -20,7 +20,7 @@ from omegaconf import OmegaConf
 from gsplat_envs.mani_skill.sensors import depth_obs_key
 from diffusion_policy_3d.dataset.multi_memmap_dataset import dataset_attrs, discover_dataset_paths
 from diffusion_policy_3d.env.maniskill.observation_wrapper.gaussian_splatting.maniskill_wrist_cam_gs_wrapper import WristCamGSManiskillDP3Wrapper
-from diffusion_policy_3d.env.maniskill.observation_wrapper.pcd.maniskill_pcd_wrapper import SingleStepPCDManiSkillDP3Wrapper
+from diffusion_policy_3d.env.maniskill.observation_wrapper.pcd.maniskill_pcd_wrapper import FusedPCDManiSkillDP3Wrapper, SingleStepPCDManiSkillDP3Wrapper
 from diffusion_policy_3d.env.maniskill.observation_wrapper.pcd.maniskill_pcd_spatial_memory_wrapper import SpatialMemoryPCDManiSkillDP3Wrapper
 
 
@@ -127,6 +127,42 @@ def single_step_pcd(
         agent_proprio_dim=agent_proprio_dim,
         cam_name=cam_name,
         num_points=composed["num_points"],
+        device=device,
+    )
+
+
+def fused_pcd(
+    *,
+    # injected by ManiSkillRunner
+    base_env,
+    device,
+    # defined in config, injected by hydra
+    representation_space,
+    agent_proprio_dim,
+    video_cam_name,
+    scene_representation,
+    dataset_path,
+):
+    """
+    Fused point-cloud perception head: every camera of the current step, built like the
+    datasets of convert_to_fused_pcd_memmap.py (config/scene_representation/fused_pcd_*.yaml,
+    asserted against the datasets' stamp). Without a crop box it keeps the segmented robot links
+    and the moving actors the datasets were converted with. video_cam_name only picks the camera
+    of the evaluation videos.
+    """
+    assert representation_space == "abs_joint_pos", (
+        f"the fused point cloud supports abs_joint_pos only, got '{representation_space}'")
+    composed = scene_representation_of_datasets(base_env, scene_representation, dataset_path)
+    moving_actors = {tuple(dataset_attrs(path)["moving_actors"]) for path in discover_dataset_paths(dataset_path)}
+    assert len(moving_actors) == 1, f"the datasets were converted with different moving actors: {moving_actors}"
+
+    return FusedPCDManiSkillDP3Wrapper(
+        base_env,
+        representation_space,
+        agent_proprio_dim=agent_proprio_dim,
+        video_cam_name=video_cam_name,
+        scene_representation=composed,
+        segmented_body_names=composed["segmented_robot_links"] + list(moving_actors.pop()),
         device=device,
     )
 

@@ -6,6 +6,7 @@ from diffusion_policy_3d.baseline_scene_integration.perception_utils import (
     cam2world_cv_from_extrinsic_cv,
     depth_to_meters,
     farthest_point_downsample,
+    fused_pcd,
 )
 from diffusion_policy_3d.env.maniskill.observation_wrapper.maniskill_dp3_base_obs_wrapper import (
     ManiSkillDP3BaseObsWrapper,
@@ -73,4 +74,65 @@ class SingleStepPCDManiSkillDP3Wrapper(ManiSkillDP3BaseObsWrapper):
         return {
             'point_cloud': farthest_point_downsample(
                 tracked_points.unsqueeze(0), self.num_points, random_start_point=False).squeeze(0),
+        }
+
+
+class FusedPCDManiSkillDP3Wrapper(ManiSkillDP3BaseObsWrapper):
+    """
+    Fused point-cloud wrapper (fused_pcd_dense / fused_pcd_sparse).
+
+    Fuses every camera of the current step with perception_utils.fused_pcd, the function
+    convert_to_fused_pcd_memmap.py builds the dataset with, and reduces the result to
+    ``num_points`` by farthest-point sampling without a random start, as the validation path
+    of the PointCloudFPS augmentation does. The random subset fused_pcd draws comes from a
+    generator reseeded at every reset, so a start state yields the same subsets in every
+    evaluation as long as the rendered images are the same.
+    """
+
+    POOL_SEED = 0
+
+    def __init__(self, env, representation_space, agent_proprio_dim, video_cam_name, scene_representation,
+                 segmented_body_names, device):
+        # Perception params must be set BEFORE super().__init__() (which calls
+        # _perception_observation_space, reading self.num_points).
+        self.scene_representation = scene_representation
+        self.num_points = scene_representation["num_points"]
+        self.compute_device = torch.device(device)
+        self.generator = torch.Generator(device=self.compute_device)
+
+        super().__init__(env, representation_space, agent_proprio_dim, render_cam_name=video_cam_name)
+
+        # Without a crop box, fused_pcd keeps the points whose segmentation id this marks.
+        segmentation_id_map = self.env.unwrapped.segmentation_id_map
+        self.is_body = torch.zeros(max(segmentation_id_map) + 1, dtype=torch.bool, device=self.compute_device)
+        for seg_id, body in segmentation_id_map.items():
+            self.is_body[seg_id] = body.name in segmented_body_names
+
+    def _perception_observation_space(self):
+        return {
+            'point_cloud': spaces.Box(
+                low=-float('inf'), high=float('inf'),
+                shape=(self.num_points, 3), dtype='float32'),
+        }
+
+    def _reset_perception_state(self):
+        self.generator.manual_seed(self.POOL_SEED)
+
+    def _get_perception_obs_dict(self, obs, step):
+        # The leading index drops the batch of the single environment, the trailing one the
+        # single depth / segmentation channel; cameras in the converter's (sorted) order.
+        frames = []
+        for camera in sorted(obs['sensor_data']):
+            sensor, params = obs['sensor_data'][camera], obs['sensor_param'][camera]
+            frames.append((
+                depth_to_meters(sensor[self.depth_key][0, ..., 0].to(self.compute_device)),
+                sensor['normal'][0].to(self.compute_device).float(),
+                sensor['segmentation'][0, ..., 0].to(self.compute_device).long(),
+                params['intrinsic_cv'][0].to(self.compute_device),
+                cam2world_cv_from_extrinsic_cv(params['extrinsic_cv'][0].to(self.compute_device)),
+            ))
+        points, _ = fused_pcd(*zip(*frames), self.is_body, self.scene_representation, self.generator)
+        return {
+            'point_cloud': farthest_point_downsample(
+                points.unsqueeze(0), self.num_points, random_start_point=False).squeeze(0),
         }

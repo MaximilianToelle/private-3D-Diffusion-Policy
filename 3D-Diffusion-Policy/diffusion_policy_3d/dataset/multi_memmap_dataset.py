@@ -161,6 +161,7 @@ class MultiMemmapDataset(BaseDataset):
         pad_after=0,
         seed=42,
         num_train_episodes=None,
+        held_out_start_yaw_deg=None,
     ):
         super().__init__()
         self.n_obs_steps = n_obs_steps
@@ -197,11 +198,21 @@ class MultiMemmapDataset(BaseDataset):
         # validation. This keeps the validation loss and the validation rollouts on the SAME
         # episodes: both read from this mask, the loss through per_buffer_val_masks and the
         # env runner through the global mask that get_validation_dataset swaps in.
-        global_train_mask = train_episode_mask(
-            n_episodes=self.total_episodes,
-            num_train_episodes=num_train_episodes,
-            seed=seed)
+        # held_out_start_yaw_deg [low, high] instead validates on every episode whose start yaw
+        # lies inside the band and trains on all others (unseen rotations).
+        if held_out_start_yaw_deg is None:
+            global_train_mask = train_episode_mask(
+                n_episodes=self.total_episodes,
+                num_train_episodes=num_train_episodes,
+                seed=seed)
+        else:
+            assert num_train_episodes is None, "held_out_start_yaw_deg replaces num_train_episodes, set it to null"
+            low, high = held_out_start_yaw_deg
+            start_yaws = self.episode_start_yaws_deg()
+            global_train_mask = (start_yaws < low) | (start_yaws > high)
         global_val_mask = ~global_train_mask
+        # unlike global_train_mask, get_validation_dataset leaves this one as it is
+        self.training_episode_mask = global_train_mask
         self.global_val_mask = global_val_mask
 
         # Slice global masks into per-buffer masks
@@ -237,6 +248,17 @@ class MultiMemmapDataset(BaseDataset):
         print(f"[{type(self).__name__}] Loaded {len(self.replay_buffers)} memmap dataset(s), "
               f"{self.total_episodes} total episodes, "
               f"{sum(self._sampler_lengths)} training samples")
+
+    def episode_start_yaws_deg(self) -> np.ndarray:
+        """Yaw of the single moving actor at the first step of every episode, in global episode
+        order. The actor stands upright at the start, so its rotation is one about z."""
+        assert len(self.actor_keys) == 1, f"a start yaw needs exactly one moving actor, the dataset has {self.actor_keys}"
+        start_yaws = []
+        for buf in self.replay_buffers:
+            episode_starts = np.concatenate([[0], buf.episode_ends[:-1]]).astype(int)
+            quaternions = np.array(buf[self.actor_keys[0]][episode_starts, 3:7])  # w, x, y, z
+            start_yaws.append(np.degrees(2 * np.arctan2(quaternions[:, 3], quaternions[:, 0])))
+        return (np.concatenate(start_yaws) + 180) % 360 - 180
 
     def _sampler_keys(self) -> List[str]:
         """The data keys every SequenceSampler materializes for a sample."""

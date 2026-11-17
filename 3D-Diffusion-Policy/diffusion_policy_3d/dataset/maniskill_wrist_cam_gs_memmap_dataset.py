@@ -141,7 +141,7 @@ class WristCamGSMemmapManiskillDataset(MultiMemmapDataset):
 
         Returns:
             init_state: dict with 'actor_poses' and 'agent_pos'
-            expert_trajectory: np.ndarray of the full expert trajectory.
+            expert_trajectory: dict with 'agent_proprio', the full expert trajectory:
                 - abs_joint_pos: joint state (qpos) trajectory
                 - relative_ee_pose: tcp_pose (7D) + gripper_state (2D) = 9D trajectory
         """
@@ -163,7 +163,7 @@ class WristCamGSMemmapManiskillDataset(MultiMemmapDataset):
             gripper_state = buf['joint_pos_proprio'][start_idx:end_idx][:, -2:]
             expert_trajectory = np.concatenate([tcp_pose_proprio, gripper_state], axis=-1)  # (T, 9)
 
-        return init_state, expert_trajectory
+        return init_state, {'agent_proprio': expert_trajectory}
 
     # =====================================================================
     # Normalization
@@ -786,16 +786,18 @@ if __name__ == "__main__":
     from diffusion_policy_3d.dataset.data_augmentations import GaussianCompose
     from omegaconf import OmegaConf
 
-    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    from diffusion_policy_3d.common.config_resolvers import register_config_resolvers
+
+    register_config_resolvers()
 
     @hydra.main(
         version_base=None,
         config_path="../config",
-        config_name="wrist_cam_gsplat_dp3"
+        config_name="experiment/stack_gsworld"
     )
     def main(cfg):
         dataset: BaseDataset
-        dataset = hydra.utils.instantiate(cfg.task.dataset)
+        dataset = hydra.utils.instantiate(cfg.dataset)
         assert isinstance(dataset, BaseDataset), f"dataset must be BaseDataset, got {type(dataset)}"
         print(f"Dataset instantiated. Length: {len(dataset)}")
 
@@ -832,8 +834,8 @@ if __name__ == "__main__":
 
         device = torch.device(cfg.training.device)
 
-        if 'train_data_augmentations' in cfg.task and cfg.task.train_data_augmentations is not None:
-            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.task.train_data_augmentations]
+        if cfg.scene_representation.get('train_data_augmentations') is not None:
+            augmentations = [hydra.utils.instantiate(t_cfg) for t_cfg in cfg.scene_representation.train_data_augmentations]
             train_data_augmentations = GaussianCompose(augmentations)
 
         for epoch in range(num_epochs):
