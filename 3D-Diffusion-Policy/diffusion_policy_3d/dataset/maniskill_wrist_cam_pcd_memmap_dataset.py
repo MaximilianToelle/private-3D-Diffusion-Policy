@@ -40,6 +40,7 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
             seed=42,
             num_train_episodes=None,
             held_out_start_yaw_deg=None,
+            held_out_dataset_path=None,
             ):
         # Opens one memmap-backed replay buffer and one sampler per dataset (point_cloud is
         # (T, N, 3) f32, read through the OS page cache), splits train/val globally over all
@@ -53,6 +54,7 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
             seed=seed,
             num_train_episodes=num_train_episodes,
             held_out_start_yaw_deg=held_out_start_yaw_deg,
+            held_out_dataset_path=held_out_dataset_path,
         )
 
         # Datasets converted with different scene-representation params must not be mixed, for

@@ -14,8 +14,11 @@ name: lift_fmb_fused_pcd
 
 data:
   # one converted dataset per piece and scene representation
-  dataset_path: /home/max/projects/gsplat_policy/datasets/${scene_representation.name}/${task.piece}
+  dataset_path: ${repo_root:}/datasets/${scene_representation.name}/${task.piece}
   num_train_episodes: 40
   # [low, high]: validate on the episodes whose start yaw lies inside, train on all others
   # (unseen rotations); needs num_train_episodes: null
   held_out_start_yaw_deg: null
+  # one of dataset_path: validate on all its episodes, train on all episodes of the others
+  # (an unseen piece, so task.piece must be its piece); needs num_train_episodes: null
+  held_out_dataset_path: null

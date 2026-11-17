@@ -162,6 +162,7 @@ class MultiMemmapDataset(BaseDataset):
         seed=42,
         num_train_episodes=None,
         held_out_start_yaw_deg=None,
+        held_out_dataset_path=None,
     ):
         super().__init__()
         self.n_obs_steps = n_obs_steps
@@ -200,16 +201,25 @@ class MultiMemmapDataset(BaseDataset):
         # env runner through the global mask that get_validation_dataset swaps in.
         # held_out_start_yaw_deg [low, high] instead validates on every episode whose start yaw
         # lies inside the band and trains on all others (unseen rotations).
-        if held_out_start_yaw_deg is None:
-            global_train_mask = train_episode_mask(
-                n_episodes=self.total_episodes,
-                num_train_episodes=num_train_episodes,
-                seed=seed)
-        else:
+        # held_out_dataset_path, one of the datasets, instead validates on all its episodes and
+        # trains on all episodes of the others (an unseen object).
+        if held_out_dataset_path is not None:
+            assert num_train_episodes is None and held_out_start_yaw_deg is None, \
+                "held_out_dataset_path replaces num_train_episodes and held_out_start_yaw_deg, set them to null"
+            assert held_out_dataset_path in self.dataset_paths, \
+                f"held_out_dataset_path {held_out_dataset_path} is not one of dataset_path {self.dataset_paths}"
+            is_held_out_dataset = np.array([path == held_out_dataset_path for path in self.dataset_paths])
+            global_train_mask = np.repeat(~is_held_out_dataset, self.episode_counts)
+        elif held_out_start_yaw_deg is not None:
             assert num_train_episodes is None, "held_out_start_yaw_deg replaces num_train_episodes, set it to null"
             low, high = held_out_start_yaw_deg
             start_yaws = self.episode_start_yaws_deg()
             global_train_mask = (start_yaws < low) | (start_yaws > high)
+        else:
+            global_train_mask = train_episode_mask(
+                n_episodes=self.total_episodes,
+                num_train_episodes=num_train_episodes,
+                seed=seed)
         global_val_mask = ~global_train_mask
         # unlike global_train_mask, get_validation_dataset leaves this one as it is
         self.training_episode_mask = global_train_mask

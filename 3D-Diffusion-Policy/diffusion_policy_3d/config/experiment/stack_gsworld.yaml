@@ -12,4 +12,4 @@ name: stack_gsworld
 
 data:
   dataset_path:
-    - /home/max/projects/gsplat_policy/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_1_positions_surf_normals_opacities_active_gaussians_mask_semantics
+    - ${repo_root:}/datasets/gsplat_3d_diffusion_policy/stack_wrist_cam_1_positions_surf_normals_opacities_active_gaussians_mask_semantics
