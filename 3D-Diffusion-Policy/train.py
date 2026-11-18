@@ -387,10 +387,10 @@ class TrainDP3Workspace:
             # run rollouts based on training and validation init poses
             if ((self.epoch + 1) % cfg.training.rollout_every) == 0 and RUN_ROLLOUT and env_runner is not None:
                 t3 = time.time()
-                runner_log_train = env_runner.run(policy, dataset=dataset, prefix=f"train_epoch_{self.epoch}")
+                runner_log_train = env_runner.run(policy, dataset=dataset, prefix=f"train_epoch_{self.epoch}", episode_seed=self.epoch)
                 # Nothing is held out when num_train_episodes is unset (train on everything).
                 runner_log_val = ({} if len(val_dataset) == 0 else
-                    env_runner.run(policy, dataset=val_dataset, prefix=f"val_epoch_{self.epoch}"))
+                    env_runner.run(policy, dataset=val_dataset, prefix=f"val_epoch_{self.epoch}", episode_seed=self.epoch))
                 t4 = time.time()
                 if verbose:
                     print(f"rollout time: {(t4-t3)/2:.3f}")
@@ -513,7 +513,7 @@ class TrainDP3Workspace:
             policy.apply_torch_compile(cfg.training.get('eval_torch_compile_mode', 'default'))
 
         if use_dataset:
-            runner_log = env_runner.run(policy, prefix=f"seperate_eval_train_epoch_{self.epoch}", dataset=dataset)
+            runner_log = env_runner.run(policy, prefix=f"seperate_eval_train_epoch_{self.epoch}", dataset=dataset, episode_seed=self.epoch)
             cprint(f"---------------- Eval Results - Train Dataset --------------", 'magenta')
             for key, value in runner_log.items():
                 if isinstance(value, float):
@@ -521,7 +521,7 @@ class TrainDP3Workspace:
 
             # Nothing is held out when num_train_episodes is unset (train on everything).
             runner_log = ({} if len(val_dataset) == 0 else env_runner.run(
-                policy, prefix=f"seperate_eval_val_epoch_{self.epoch}", dataset=val_dataset))
+                policy, prefix=f"seperate_eval_val_epoch_{self.epoch}", dataset=val_dataset, episode_seed=self.epoch))
             cprint(f"---------------- Eval Results - Validation Dataset --------------", 'magenta')
             for key, value in runner_log.items():
                 if isinstance(value, float):

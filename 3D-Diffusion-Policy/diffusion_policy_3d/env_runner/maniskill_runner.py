@@ -147,9 +147,22 @@ class ManiSkillRunner(BaseRunner):
             self.envs[key] = env
         return self.envs[key]
 
-    def run(self, policy: BasePolicy, dataset=None, prefix: str = ""):
+    def run(self, policy: BasePolicy, dataset=None, prefix: str = "", episode_seed: Optional[int] = None):
+        """Rolls out eval_episodes episodes, from the start states of the dataset's episodes if
+        given: those of its global train/val mask, shuffled with episode_seed (in order if None),
+        cycling when eval_episodes exceeds them. train.py passes the epoch, so each evaluation
+        draws other episodes, and runs of the same experiment draw the same ones at an epoch."""
         policy_device = policy.device   # obs tensors must match the policy's weights, not the sim device
         self.rollout_dataset = dataset   # callbacks read the episodes and their split from it
+        if dataset is not None:
+            # NOTE: global_train_mask is set to the val_mask in the validation dataset.
+            episodes = np.where(dataset.global_train_mask)[0]
+            assert len(episodes) > 0, (
+                "the dataset holds no episodes to draw rollout initial states from -- "
+                "with val_ratio=0 and max_train_episodes unset nothing is held out for "
+                "validation, so pass dataset=None to roll out from random initial states")
+            if episode_seed is not None:
+                episodes = np.random.default_rng(episode_seed).permutation(episodes)
 
         all_traj_rewards: List[float] = []
         all_success_rates: List[float] = []
@@ -166,16 +179,8 @@ class ManiSkillRunner(BaseRunner):
             init_state = None
             expert_trajectory = None
             if dataset is not None:
-                # The episodes of the global train/val mask in order, cycling when eval_episodes
-                # exceeds them, so every evaluation starts from the same states.
-                # NOTE: global_train_mask is set to the val_mask in the validation dataset.
-                valid_episode_indices = np.where(dataset.global_train_mask)[0]
-                assert len(valid_episode_indices) > 0, (
-                    "the dataset holds no episodes to draw rollout initial states from -- "
-                    "with val_ratio=0 and max_train_episodes unset nothing is held out for "
-                    "validation, so pass dataset=None to roll out from random initial states")
                 # get_episode_init_data handles multi-buffer routing internally.
-                episode = valid_episode_indices[episode_idx % len(valid_episode_indices)]
+                episode = episodes[episode_idx % len(episodes)]
                 init_state, expert_trajectory = dataset.get_episode_init_data(episode)
                 env = self._env({key: dataset.episode_env_kwargs(episode)[key] for key in self.env_kwargs})
 
