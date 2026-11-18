@@ -12,5 +12,6 @@ defaults:
 name: insert_fmb_fused_pcd
 
 data:
-  # one converted dataset per piece and scene representation
+  # per piece and scene representation, a directory of datasets, one per recording
   dataset_path: ${repo_root:}/datasets/insert_fmb/${scene_representation.name}/${task.piece}
+  num_train_episodes: 450   # of 500
