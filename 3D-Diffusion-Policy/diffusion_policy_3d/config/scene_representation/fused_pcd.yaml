@@ -9,7 +9,9 @@ defaults:
   - point_cloud
   - _self_
 
-obs_mode: rgb+depth+segmentation+normal   # normals for the fused point cloud, rgb for the evaluation videos
+# ManiSkill renders nothing in its step: the observation wrapper renders the images of the steps
+# whose observation the policy reads, and the video camera's rgb at every step
+obs_mode: state_dict
 
 # The single source of truth of the representation's parameters: the dataset converter
 # (scripts/dataset/conversion/convert_to_fused_pcd_memmap.py) stamps the composed variant into

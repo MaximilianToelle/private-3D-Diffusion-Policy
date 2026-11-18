@@ -152,6 +152,11 @@ def fused_pcd(
     """
     assert representation_space == "abs_joint_pos", (
         f"the fused point cloud supports abs_joint_pos only, got '{representation_space}'")
+    assert base_env.unwrapped.obs_mode == "state_dict", (
+        "the fused point-cloud wrapper renders the cameras itself, so ManiSkill must not render in "
+        f"its step (obs_mode state_dict), got '{base_env.unwrapped.obs_mode}'")
+    assert base_env.unwrapped.depth_mode is None, (
+        "the fused point-cloud wrapper reads the renderer's ground-truth depth only, not a depth_mode's")
     composed = scene_representation_of_datasets(base_env, scene_representation, dataset_path)
     moving_actors = {tuple(dataset_attrs(path)["moving_actors"]) for path in discover_dataset_paths(dataset_path)}
     assert len(moving_actors) == 1, f"the datasets were converted with different moving actors: {moving_actors}"

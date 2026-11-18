@@ -9,8 +9,14 @@ Hook order per `ManiSkillRunner.run`:
       before_episode_start_after_env_reset          -> per episode
         after_action_predict              -> per step, BEFORE env.step
         after_env_step                 -> per step
-      at_episode_end            -> per episode (guarded: exceptions are logged, not raised)
-    at_run_end                  -> once, after all episodes (guarded)
+      at_episode_end            -> per episode, returns the callback's record of the episode
+                                   (guarded: exceptions are logged, not raised, the record is None)
+    at_run_end                  -> once, after all episodes, with the records of all episodes (guarded)
+
+With the runner's num_workers > 1 each worker process holds its own copies of the callbacks and
+runs every hook up to at_episode_end; at_run_end runs in the main process. So a callback keeps
+state only within an episode and hands everything at_run_end needs over in its record, which
+must pickle.
 
 `after_action_predict` / `after_env_step` run in the hot loop and are intentionally *not* guarded, so
 misconfigured callbacks fail loudly.
@@ -112,9 +118,11 @@ class EvalCallback:
         pass
 
     def at_episode_end(self, runner, *, episode_idx, is_success, prefix, env, expert_trajectory, info):
-        pass
+        """The callback's record of the episode, which at_run_end receives."""
+        return None
 
-    def at_run_end(self, runner, *, prefix, log_data):
+    def at_run_end(self, runner, *, prefix, log_data, records):
+        """records: at_episode_end's record of every episode, in episode order."""
         pass
 
 
@@ -146,8 +154,6 @@ class VideoSavingCallback(EvalCallback):
 
     def at_episode_end(self, runner, *, episode_idx, is_success, prefix, env, expert_trajectory, info):
         video = _find_wrapper(env, SimpleVideoRecordingWrapper).get_video()  # (T, C, H, W)
-        if episode_idx == 0:
-            self.wandb_video = wandb.Video(video[:, :, ::2, ::2], fps=_find_env_attr(runner.env, "control_freq"), format="mp4")
 
         video_dir = os.path.join(runner.output_dir, "eval_videos")
         os.makedirs(video_dir, exist_ok=True)
@@ -159,9 +165,10 @@ class VideoSavingCallback(EvalCallback):
         out_path = os.path.join(video_dir, f"{prefix}_ep_{episode_idx}_{suffix}.mp4")
         imageio.mimsave(out_path, video_to_save, fps=_find_env_attr(runner.env, "control_freq"), macro_block_size=1)
         cprint(f"Saved evaluation video to {out_path}", "cyan")
+        return video[:, :, ::2, ::2] if episode_idx == 0 else None
 
-    def at_run_end(self, runner, *, prefix, log_data):
-        log_data['video'] = self.wandb_video
+    def at_run_end(self, runner, *, prefix, log_data, records):
+        log_data['video'] = wandb.Video(records[0], fps=_find_env_attr(runner.env, "control_freq"), format="mp4")
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +189,6 @@ class GaussianAttentionPlotCallback(EvalCallback):
     """
 
     def __init__(self):
-        self.num_unique_gaussians_over_all_episodes: List[np.ndarray] = []
         self.num_unique_gaussians_over_episode: List[int] = []
 
     def at_run_start(self, runner, policy):
@@ -194,7 +200,6 @@ class GaussianAttentionPlotCallback(EvalCallback):
                 f"policy.obs_encoder.extractor._latest_pool_indices."
             )
         _find_wrapper(runner.env, AttentionOverlayWrapper)  # raises if absent
-        self.num_unique_gaussians_over_all_episodes = []
         self.num_unique_gaussians_over_episode = []
 
     def before_episode_start_after_env_reset(self, runner, *, episode_idx, init_state, expert_trajectory):
@@ -213,13 +218,13 @@ class GaussianAttentionPlotCallback(EvalCallback):
         _find_wrapper(env, AttentionOverlayWrapper).set_attention(pool_idx, obs_gs_rgb)
 
     def at_episode_end(self, runner, *, episode_idx, is_success, prefix, env, expert_trajectory, info):
-        self.num_unique_gaussians_over_all_episodes.append(np.array(self.num_unique_gaussians_over_episode))
+        return np.array(self.num_unique_gaussians_over_episode)
 
-    def at_run_end(self, runner, *, prefix, log_data):
+    def at_run_end(self, runner, *, prefix, log_data, records):
         plot_dir = os.path.join(runner.output_dir, "eval_plots")
         os.makedirs(plot_dir, exist_ok=True)
         num_unique_gs_path = os.path.join(plot_dir, f"{prefix}_num_unique_gaussians_time.png")
-        save_num_unique_gaussians_plot(self.num_unique_gaussians_over_all_episodes, save_path=num_unique_gs_path)
+        save_num_unique_gaussians_plot(records, save_path=num_unique_gs_path)
         cprint(f"Saved Num Unique Gaussians plot to {num_unique_gs_path}", "cyan")
 
 
@@ -238,16 +243,7 @@ class TrajectoryPlotCallback(EvalCallback):
         assert representation_space in ("abs_joint_pos", "relative_ee_pose"), \
             f"representation_space must be 'abs_joint_pos' or 'relative_ee_pose', got '{representation_space}'"
         self.representation_space = representation_space
-        self.all_expert_trajectories: List = []
-        self.all_policy_trajectories: List = []
-        self.all_predicted_actions: List = []
         self.current_predicted_actions: List = []
-
-    def at_run_start(self, runner, policy):
-        self.all_expert_trajectories = []
-        self.all_policy_trajectories = []
-        self.all_predicted_actions = []
-        self.current_predicted_actions = []
 
     def before_episode_start_after_env_reset(self, runner, *, episode_idx, init_state, expert_trajectory):
         self.current_predicted_actions = []
@@ -266,11 +262,12 @@ class TrajectoryPlotCallback(EvalCallback):
 
     def at_episode_end(self, runner, *, episode_idx, is_success, prefix, env, expert_trajectory, info):
         traj_agent_proprio = _find_wrapper(env, MultiStepWrapper).traj_agent_proprio
-        self.all_expert_trajectories.append(expert_trajectory['agent_proprio'])
-        self.all_policy_trajectories.append(torch.stack(list(traj_agent_proprio)).cpu().numpy())
-        self.all_predicted_actions.append(np.array(self.current_predicted_actions))
+        # (expert, policy, predicted actions)
+        return (expert_trajectory['agent_proprio'], torch.stack(list(traj_agent_proprio)).cpu().numpy(),
+                np.array(self.current_predicted_actions))
 
-    def at_run_end(self, runner, *, prefix, log_data):
+    def at_run_end(self, runner, *, prefix, log_data, records):
+        expert_trajectories, policy_trajectories, predicted_actions = map(list, zip(*records))
         plot_dir = os.path.join(runner.output_dir, "eval_plots")
         os.makedirs(plot_dir, exist_ok=True)
 
@@ -281,17 +278,17 @@ class TrajectoryPlotCallback(EvalCallback):
             joint_pos_path = os.path.join(plot_dir, f"{prefix}_joint_pos_time.png")
 
             save_phase_corridor_plot(
-                self.all_expert_trajectories,
-                self.all_policy_trajectories,
+                expert_trajectories,
+                policy_trajectories,
                 dt=control_dt,
                 save_path=plot_path,
             )
             cprint(f"Saved Phase Corridor plot to {plot_path}", "cyan")
 
             save_joint_pos_over_time_plot(
-                self.all_expert_trajectories,
-                self.all_policy_trajectories,
-                self.all_predicted_actions,
+                expert_trajectories,
+                policy_trajectories,
+                predicted_actions,
                 save_path=joint_pos_path,
             )
             cprint(f"Saved Joint Position plot to {joint_pos_path}", "cyan")
@@ -299,9 +296,9 @@ class TrajectoryPlotCallback(EvalCallback):
         elif self.representation_space == "relative_ee_pose":
             tcp_state_path = os.path.join(plot_dir, f"{prefix}_tcp_state_time.png")
             save_tcp_state_over_time_plot(
-                self.all_expert_trajectories,
-                self.all_policy_trajectories,
-                self.all_predicted_actions,
+                expert_trajectories,
+                policy_trajectories,
+                predicted_actions,
                 save_path=tcp_state_path,
             )
             cprint(f"Saved TCP State plot to {tcp_state_path}", "cyan")
@@ -428,11 +425,9 @@ class GraspDeviationCallback(EvalCallback):
         self.actor_name = actor_name
         self.actor_key = f'actor_pose_{actor_name}'
         self.gripper = GripperEvents()
-        self.rollouts: List[dict] = []
 
     def at_run_start(self, runner, policy):
         assert runner.representation_space == "abs_joint_pos", "the grasp pose error needs the joint positions as proprio"
-        self.rollouts = []
 
     def before_episode_start_after_env_reset(self, runner, *, episode_idx, init_state, expert_trajectory):
         self.demonstration = expert_trajectory
@@ -474,15 +469,16 @@ class GraspDeviationCallback(EvalCallback):
             rollout['demonstration_grasp_piece_displacement_mm'], rollout['demonstration_grasp_piece_displacement_deg'] = \
                 self._piece_displacement(self.demonstration['actor_poses'][self.actor_key],
                                          self.demonstration['agent_proprio'], demonstration_close)
-        self.rollouts.append(rollout)
+        return rollout
 
-    def at_run_end(self, runner, *, prefix, log_data):
-        closed = [rollout for rollout in self.rollouts if rollout['closed']]
+    def at_run_end(self, runner, *, prefix, log_data, records):
+        rollouts = [rollout for rollout in records if rollout is not None]
+        closed = [rollout for rollout in rollouts if rollout['closed']]
         log_data['grasp_num_closed'] = len(closed)
-        log_data['grasp_num_never_closed'] = len(self.rollouts) - len(closed)
+        log_data['grasp_num_never_closed'] = len(rollouts) - len(closed)
         _log_spread(log_data, closed, [metric for row in self.PANELS for metric, _ in row])
         _save_deviation_plot_of_run(runner, self, closed, prefix, "grasp_deviation",
-                                    title=f"{prefix}: {len(closed)} of {len(self.rollouts)} rollouts closed the gripper")
+                                    title=f"{prefix}: {len(closed)} of {len(rollouts)} rollouts closed the gripper")
 
 
 class InsertionDeviationCallback(EvalCallback):
@@ -516,11 +512,9 @@ class InsertionDeviationCallback(EvalCallback):
         self.actor_name = actor_name
         self.actor_key = f'actor_pose_{actor_name}'
         self.gripper = GripperEvents()
-        self.rollouts: List[dict] = []
 
     def at_run_start(self, runner, policy):
         assert runner.representation_space == "abs_joint_pos", "the in-hand slip needs the joint positions as proprio"
-        self.rollouts = []
 
     def before_episode_start_after_env_reset(self, runner, *, episode_idx, init_state, expert_trajectory):
         self.demonstration = expert_trajectory
@@ -588,11 +582,12 @@ class InsertionDeviationCallback(EvalCallback):
                                    _pose_matrix(demonstration_tcp[released]), _pose_matrix(demonstration_pieces[released]))
         demonstration.update(self._hole_errors(_pose_matrix(demonstration_pieces[self._above_hole_step(demonstration_pieces)])))
         rollout.update({f'demonstration_{key}': value for key, value in demonstration.items()})
-        self.rollouts.append(rollout)
+        return rollout
 
-    def at_run_end(self, runner, *, prefix, log_data):
-        log_data['insertion_num_above_hole'] = sum('above_hole_lateral_offset_mm' in rollout for rollout in self.rollouts)
-        _log_spread(log_data, self.rollouts, self.METRICS + [f'demonstration_{metric}' for metric in self.METRICS])
+    def at_run_end(self, runner, *, prefix, log_data, records):
+        rollouts = [rollout for rollout in records if rollout is not None]
+        log_data['insertion_num_above_hole'] = sum('above_hole_lateral_offset_mm' in rollout for rollout in rollouts)
+        _log_spread(log_data, rollouts, self.METRICS + [f'demonstration_{metric}' for metric in self.METRICS])
 
 
 def _log_spread(log_data, rollouts, metrics):

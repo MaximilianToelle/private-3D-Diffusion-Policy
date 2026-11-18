@@ -55,7 +55,7 @@ bash scripts/train_policy.sh lift_fmb_fused_pcd hexagon_large 42 0 task.piece=he
 | file / folder | holds |
 |---|---|
 | `experiment/` | one file per experiment: one task, one scene representation, one policy, its data and name |
-| `task/` | the ManiSkill env: env id, piece, max_steps, shader, its callbacks |
+| `task/` | the ManiSkill env: env id, piece, max_steps, its callbacks |
 | `scene_representation/` | what the policy sees and how: parameters stamped into the dataset, depth source, cameras, observation-wrapper builder, dataset class, point sampling, its callbacks |
 | `policy/` | the network, its frame (`representation_space`), horizon, observation and action steps |
 | `base.yaml` | settings every experiment shares (evaluation, training, logging), and the `dataset`, `shape_meta` and `env_runner` assembled from the selected files |
@@ -65,8 +65,21 @@ Every value is defined in exactly one file. `${merge:a,b}` in `base.yaml` joins 
 and fails if both define the same key.
 
 Rollouts run inside training via `ManiSkillRunner`, so a training run also exercises the
-environment and the wrapper chain. Dataset classes and most wrappers have a `__main__` smoke test
-reporting shapes, normalizer statistics and throughput:
+environment and the wrapper chain.
+
+- Every rollout runs in the env its start state was recorded in. The converter stamps the
+  recording's env id, `gymnasium.make` arguments and simulation and control rate into the
+  dataset. The runner sets only `obs_mode`, `depth_mode`, `control_mode` and `max_episode_steps`
+  itself, and asserts that the env runs at the stamped rate.
+- `env_runner.num_workers` processes roll out the episodes in parallel, each with its own envs,
+  callbacks and policy copy. A callback therefore keeps state only within an episode:
+  `at_episode_end` returns its record of the episode, `at_run_end` receives the records of all
+  episodes.
+- The policy reads only the last `n_obs_steps` observations of an action chunk, so the fused
+  point-cloud wrapper renders the cameras only for those steps, and keeps the images on the GPU.
+
+Dataset classes and most wrappers have a `__main__` smoke test reporting shapes, normalizer
+statistics and throughput:
 
 ```bash
 python -m diffusion_policy_3d.dataset.maniskill_wrist_cam_pcd_memmap_dataset

@@ -111,6 +111,18 @@ def dataset_attrs(dataset_path) -> dict:
         return json.load(file)['attrs']
 
 
+RECORDED_ENV_KEYS = ('env_id', 'env_kwargs', 'sim_freq', 'control_freq')
+
+
+def recorded_env(dataset_path) -> dict:
+    """The env the dataset's demonstrations were recorded in, as the converter stamped it: its
+    env_id and gymnasium.make arguments (env_kwargs), and the sim_freq and control_freq it ran at."""
+    attrs = dataset_attrs(dataset_path)
+    missing = [key for key in RECORDED_ENV_KEYS if key not in attrs]
+    assert not missing, f"{dataset_path} lacks the stamp of {missing} -- reconvert with the current converter"
+    return {key: attrs[key] for key in RECORDED_ENV_KEYS}
+
+
 def discover_dataset_paths(dataset_path, markers=(META_FILENAME,)) -> List[str]:
     """
     Resolve dataset_path into a list of concrete dataset paths.
@@ -297,13 +309,10 @@ class MultiMemmapDataset(BaseDataset):
         end_idx = int(buf.episode_ends[local_ep_idx])
         return buf, start_idx, end_idx
 
-    def episode_env_kwargs(self, global_episode_idx) -> dict:
-        """The env kwargs the episode was recorded with, stamped into its dataset by the converter."""
+    def episode_recorded_env(self, global_episode_idx) -> dict:
+        """recorded_env of the episode's dataset."""
         buf_idx, _ = self._global_episode_to_local(global_episode_idx)
-        attrs = dataset_attrs(self.dataset_paths[buf_idx])
-        assert 'env_kwargs' in attrs, \
-            f"{self.dataset_paths[buf_idx]} lacks the env_kwargs stamp -- reconvert with the current converter"
-        return attrs['env_kwargs']
+        return recorded_env(self.dataset_paths[buf_idx])
 
     # =====================================================================
     # Validation dataset

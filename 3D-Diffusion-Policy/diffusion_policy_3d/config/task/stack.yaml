@@ -1,8 +1,6 @@
 # The stack task (StackFr3WristCamEnv-v1).
 
 env_id: StackFr3WristCamEnv-v1
-env_kwargs: {}
 max_steps: 400   # the env's own limit
-shader: default   # sensor cameras: default (rasterizer) | rt, the one the recordings were rendered with
 callbacks: []
 gsworld_scene: fr3_stack_with_normals   # GSWorld's pre-scanned Gaussians of this scene, for scene_representation=gsworld

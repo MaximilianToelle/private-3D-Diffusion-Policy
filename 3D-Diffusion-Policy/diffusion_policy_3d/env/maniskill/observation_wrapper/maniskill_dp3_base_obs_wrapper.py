@@ -73,10 +73,11 @@ class ManiSkillDP3BaseObsWrapper(gym.Env):
     # ------------------------------------------------------------------ #
     # Shared concrete behavior.
     # ------------------------------------------------------------------ #
-    def _get_obs_dict(self, obs, step) -> dict:
+    def _get_obs_dict(self, obs, step, observe=True) -> dict:
         """
         Assemble the full observation: 'agent_proprio' (owned here) + the subclass's perception keys.
-        Also caches the last RGB frame for `render()` (shared plumbing).
+        Also caches the last RGB frame for `render()` (shared plumbing). `observe` (see `step`)
+        is ignored here, as a stateful representation needs every step.
         """
         self._cache_render_frame(obs)
         obs_dict = {'agent_proprio': self._extract_agent_proprio(obs)}
@@ -111,14 +112,16 @@ class ManiSkillDP3BaseObsWrapper(gym.Env):
             raise ValueError(f"Unhandled representation_space '{self.representation_space}'")
         return agent_proprio
 
-    def step(self, action):
+    def step(self, action, observe=True):
+        """observe: whether the policy reads this step's observation (MultiStepWrapper knows); a
+        wrapper may then leave out its perception keys."""
         if hasattr(self.env.unwrapped, "num_envs") and self.env.unwrapped.num_envs > 0:
             if not isinstance(action, torch.Tensor):
                 action = torch.from_numpy(action)
             action = action.unsqueeze(0)
 
         obs, reward, terminated, truncated, info = self.env.step(action)
-        obs_dict = self._get_obs_dict(obs, info['elapsed_steps'].item())
+        obs_dict = self._get_obs_dict(obs, info['elapsed_steps'].item(), observe)
 
         if hasattr(terminated, "item"):
             terminated = bool(terminated.item())

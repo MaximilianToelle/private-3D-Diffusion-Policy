@@ -41,13 +41,13 @@ class AttentionOverlayWrapper(gym.Wrapper):
         """Store the latest attention indices/colors to overlay on subsequent renders."""
         self._overlay = (pool_idx, obs_gs_rgb)
 
-    def step(self, action):
+    def step(self, action, observe=True):
         # Apply the overlay BEFORE stepping: the GSWorld overwrite state is persistent and
         # is read by the render that happens inside `self.env.step`, so the frame the video
         # wrapper captures reflects the current attention.
         if self._overlay is not None:
             self._apply_overlay(*self._overlay)
-        return self.env.step(action)
+        return self.env.step(action, observe=observe)
 
     def reset(self, **kwargs):
         self._overlay = None

@@ -148,6 +148,13 @@ class DP3(BasePolicy):
         object.__setattr__(self, '_compiled_model', torch.compile(self.model, mode=mode, dynamic=False))
         object.__setattr__(self, '_compiled_obs_encoder', torch.compile(self.obs_encoder, mode=mode, dynamic=False))
 
+    def __getstate__(self):
+        # A copy (deepcopy, pickle) is the uncompiled policy, since the compiled modules do not pickle.
+        state = dict(super().__getstate__())
+        state.pop('_compiled_model', None)
+        state.pop('_compiled_obs_encoder', None)
+        return state
+
     @property
     def _active_model(self):
         compiled_model = self.__dict__.get('_compiled_model')

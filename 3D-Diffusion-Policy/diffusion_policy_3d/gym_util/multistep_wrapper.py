@@ -140,11 +140,13 @@ class MultiStepWrapper(gym.Wrapper):
         """
         actions: (n_action_steps,) + action_shape
         """
-        for act in action:
+        for step_in_chunk, act in enumerate(action):
             if len(self.done) > 0 and self.done[-1]:
                 # termination
                 break
-            observation, reward, done, info = super().step(act)
+            # the policy reads only the observations of the chunk's last n_obs_steps steps
+            observation, reward, done, info = self.env.step(
+                act, observe=step_in_chunk >= len(action) - self.n_obs_steps)
 
             self.obs.append(observation)
             self.traj_agent_proprio.append(observation['agent_proprio'])
@@ -170,12 +172,14 @@ class MultiStepWrapper(gym.Wrapper):
         if isinstance(self.observation_space, spaces.Box):
             return stack_last_n_obs(self.obs, n_steps)
         elif isinstance(self.observation_space, spaces.Dict):
+            # A step the policy does not read may lack the perception keys (observe in step).
+            # Only an episode that ended before its chunk's last steps leaves such steps among
+            # the last n_steps, and then the policy is not called again.
+            last_obs = list(self.obs)[-n_steps:]
             result = dict()
             for key in self.observation_space.keys():
-                result[key] = stack_last_n_obs(
-                    [obs[key] for obs in self.obs],
-                    n_steps
-                )
+                if all(key in obs for obs in last_obs):
+                    result[key] = stack_last_n_obs([obs[key] for obs in last_obs], n_steps)
             return result
         else:
             raise RuntimeError('Unsupported space type')

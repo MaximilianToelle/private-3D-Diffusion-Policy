@@ -22,8 +22,8 @@ class ActorPoseRecordingWrapper(gym.Wrapper):
         self._record()
         return obs
 
-    def step(self, action):
-        result = super().step(action)
+    def step(self, action, observe=True):
+        result = self.env.step(action, observe=observe)
         self._record()
         return result
 

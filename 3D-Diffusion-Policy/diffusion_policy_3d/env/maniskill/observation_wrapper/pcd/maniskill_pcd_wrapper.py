@@ -87,6 +87,12 @@ class FusedPCDManiSkillDP3Wrapper(ManiSkillDP3BaseObsWrapper):
     of the PointCloudFPS augmentation does. The random subset fused_pcd draws comes from a
     generator reseeded at every reset, so a start state yields the same subsets in every
     evaluation as long as the rendered images are the same.
+
+    ManiSkill renders nothing inside its step (obs_mode state_dict, asserted by the builder).
+    This wrapper renders what a step needs itself: the video camera's rgb at every step, and the
+    depth, normals and segmentation of every camera only at the steps whose observation the
+    policy reads (observe), the last n_obs_steps of an action chunk. The images stay on the GPU,
+    where fused_pcd runs (copying a texture to the CPU takes 5-7 ms, reading it on the GPU 1.3 ms).
     """
 
     POOL_SEED = 0
@@ -117,6 +123,40 @@ class FusedPCDManiSkillDP3Wrapper(ManiSkillDP3BaseObsWrapper):
 
     def _reset_perception_state(self):
         self.generator.manual_seed(self.POOL_SEED)
+
+    def _render_cameras(self, observe):
+        """sensor_param and sensor_data as ManiSkill's step would return them, rendered in the
+        same order (BaseEnv._get_obs_with_sensor_data) and with the same texture transforms
+        (Camera.get_obs), but holding only the images this step needs, on the GPU."""
+        base_env = self.env.unwrapped
+        cameras = sorted(base_env.scene.sensors) if observe else [self.render_cam_name]
+        sensor_param = {name: base_env.scene.sensors[name].get_params() for name in cameras}
+        for actor in base_env._hidden_objects:
+            actor.hide_visual()
+        base_env.scene.update_render()
+        sensor_data = {}
+        for name in cameras:
+            camera = base_env.scene.sensors[name]
+            camera.capture()
+            modalities = ({'depth', 'segmentation', 'normal'} if observe else set()) | ({'rgb'} if name == self.render_cam_name else set())
+            shader = camera.config.shader_config
+            sensor_data[name] = {}
+            for texture_name, texture_modalities in shader.texture_names.items():
+                if modalities & set(texture_modalities):
+                    # a view of the renderer's buffer, which the next capture overwrites
+                    texture = camera.camera._render_cameras[0].get_picture_cuda(texture_name).torch()[None]
+                    sensor_data[name].update({modality: image.clone() for modality, image in
+                                              shader.texture_transforms[texture_name](texture).items() if modality in modalities})
+        return sensor_param, sensor_data
+
+    def _get_obs_dict(self, obs, step, observe=True):
+        sensor_param, sensor_data = self._render_cameras(observe)
+        obs = dict(obs, sensor_param=sensor_param, sensor_data=sensor_data)
+        self._cache_render_frame(obs)
+        obs_dict = {'agent_proprio': self._extract_agent_proprio(obs)}
+        if observe:
+            obs_dict.update(self._get_perception_obs_dict(obs, step))
+        return obs_dict
 
     def _get_perception_obs_dict(self, obs, step):
         # The leading index drops the batch of the single environment, the trailing one the

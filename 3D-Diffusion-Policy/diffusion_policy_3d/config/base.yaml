@@ -1,7 +1,8 @@
 # Settings every experiment shares, and the place where the parts of an experiment meet.
 #
 # An experiment (experiment/*.yaml) picks one file of each group
-#   task/                  the ManiSkill env: env id, piece, max_steps, shader, its callbacks
+#   task/                  the ManiSkill env: env id, piece, max_steps, its callbacks (every other
+#                          argument of the env is the recording's, stamped into the dataset)
 #   scene_representation/  what the policy sees and how: the parameters stamped into the dataset,
 #                          depth source, cameras, observation-wrapper builder, dataset class,
 #                          point sampling, its callbacks
@@ -54,14 +55,13 @@ env_runner:
   _target_: diffusion_policy_3d.env_runner.maniskill_runner.ManiSkillRunner
   # the task
   task_name: ${task.env_id}
-  env_kwargs: ${task.env_kwargs}
   max_steps: ${task.max_steps}
-  shader: ${task.shader}
   task_callbacks: ${task.callbacks}
   # the scene representation
   obs_mode: ${scene_representation.obs_mode}
   depth_mode: ${eval:'{"gt":None,"ffs":"fast_foundation_stereo"}["${scene_representation.depth}"]'}
   maniskill_env_obs_wrapper_builder: ${scene_representation.obs_wrapper_builder}
+  dataset_path: ${data.dataset_path}
   obs_key_aliases: ${scene_representation.obs_key_aliases}
   scene_representation_callbacks: ${scene_representation.callbacks}
   # the policy
@@ -71,9 +71,7 @@ env_runner:
   n_action_steps: ${policy.n_action_steps}
   # the evaluation protocol, the same for every experiment
   eval_episodes: 20
-  robot_uids: fr3_umi_wrist_zedxmini   # the only registered wrist-cam robot since the ZED X Mini migration
-  n_envs: 1
-  sim_backend: cpu   # the recordings' physics (the gpu sim's camera group also fails with rt); policy and perception stay on `device`
+  num_workers: 4     # processes rolling out the episodes in parallel, each with its own env and policy copy
   device: cuda:0
   tqdm_interval_sec: 5.0
   callbacks:

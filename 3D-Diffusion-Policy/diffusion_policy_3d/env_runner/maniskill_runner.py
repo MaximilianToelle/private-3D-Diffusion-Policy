@@ -1,12 +1,17 @@
 """Single, representation-agnostic ManiSkill evaluation runner.
 
+  * A rollout from a dataset episode runs in the env that episode was recorded in: the
+    recording's gymnasium.make arguments, stamped into the dataset by the converter, with only
+    the evaluation's own ones (`evaluation_make_kwargs`) in their place. `_env` builds one env
+    per recorded setup, e.g. per piece.
   * The env's perception-specific wrappers are built by the `maniskill_env_obs_wrapper_builder`
     callable selected in config. Shared wrappers (video recording -> actor pose recording -> multi-step 
-    -> optional relative-EE control) are applied in `_env`, which builds one env per value of the
-    task's env_kwargs (a rollout from a dataset episode uses that episode's recorded ones).
+    -> optional relative-EE control) are applied in `_env`.
     The runner injects the shared runtime params (base_env, device, representation_space,
     n_obs_steps, n_action_steps); wrapper-specific params get defined in the config.
     -> For a new use case, add a new obs wrapper function + a config that points at it.
+  * With num_workers > 1, worker processes roll out the episodes in parallel, each with its own
+    envs, callbacks and copy of the policy (`_rollout_worker`).
   * Logging / visualization live in `callbacks` (see `maniskill_callbacks.py`).
 
 The eval loop forwards *every* observation key to the policy (the GSplat/DP3 encoders
@@ -14,10 +19,16 @@ select the keys they need and ignore the rest), plus any configured `obs_key_ali
 (e.g. ``point_cloud: gs_positions``).
 """
 
+import copy
+import json
+import pickle
+import traceback
+from multiprocessing.connection import wait
 from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import torch
+import torch.multiprocessing
 import tqdm
 
 import gsworld       # imported before gymnasium to register the GS wrappers' env side
@@ -25,6 +36,7 @@ import gsplat_envs   # registers our envs and agents (tasks moved out of the GSW
 import gymnasium
 from diffusion_policy_3d.policy.base_policy import BasePolicy
 from diffusion_policy_3d.common.pytorch_util import dict_apply
+from diffusion_policy_3d.dataset.multi_memmap_dataset import discover_dataset_paths, recorded_env
 from diffusion_policy_3d.env_runner.base_runner import BaseRunner
 from diffusion_policy_3d.env_runner.maniskill_callbacks import EvalCallback
 from diffusion_policy_3d.env.maniskill.relative_ee_control_wrapper import RelativeEEControlWrapper
@@ -60,27 +72,26 @@ class ManiSkillRunner(BaseRunner):
         self,
         output_dir,
         maniskill_env_obs_wrapper_builder: Callable,
+        dataset_path,               # the policy's datasets; a rollout without a dataset runs in the env of the first
         callbacks: Optional[List[EvalCallback]] = None,                       # the shared ones (base.yaml)
         scene_representation_callbacks: Optional[List[EvalCallback]] = None,  # the scene representation's
         task_callbacks: Optional[List[EvalCallback]] = None,                  # the task's
         obs_key_aliases: Optional[Dict[str, str]] = None,
         eval_episodes: int = 20,
+        num_workers: int = 1,       # processes rolling out the episodes in parallel
         tqdm_interval_sec: float = 5.0,
-        task_name: Optional[str] = None,
-        robot_uids: str = "fr3_umi_wrist435_modified",
+        task_name: Optional[str] = None,    # the env id, asserted against the datasets' stamp
         obs_mode: str = "rgb+depth+segmentation",
         representation_space: str = "relative_ee_pose",
         agent_proprio_dim: int = 11,
         n_obs_steps: int = 2,
         n_action_steps: int = 8,
-        n_envs: int = 1,
         max_steps: int = 1000,
         device: str = "cuda:0",
         depth_mode: str = None,     # None (gt) | fast_foundation_stereo, the depth the datasets were converted from
-        shader: str = "default",    # sensor cameras: default (rasterizer) | rt | rt-med | rt-fast, as recorded
-        sim_backend: str = "cpu",   # physics: cpu | gpu (the cpu sim is what the recordings are made on)
-        env_kwargs: Optional[dict] = None,  # further arguments of the task's env, e.g. the piece of LiftFmbObjectFr3Env-v1
     ):
+        # a rollout worker builds its own runner from these
+        self.init_kwargs = {key: value for key, value in locals().items() if key not in ("self", "__class__")}
         super().__init__(output_dir)
         
         assert representation_space in REPRESENTATION_SPACES, \
@@ -91,6 +102,7 @@ class ManiSkillRunner(BaseRunner):
         self.agent_proprio_dim = agent_proprio_dim      # policy-facing proprio dim from the config shape_meta
         self._obs_shape_validated = False
         self.eval_episodes = eval_episodes
+        self.num_workers = num_workers
         self.tqdm_interval_sec = tqdm_interval_sec
         self.device = device
         
@@ -99,19 +111,14 @@ class ManiSkillRunner(BaseRunner):
             *(scene_representation_callbacks or []), *(callbacks or []), *(task_callbacks or [])]
         self.obs_key_aliases: Dict[str, str] = dict(obs_key_aliases) if obs_key_aliases is not None else {}
 
-        if depth_mode is not None:
-            assert n_envs == 1, "swapped depth backends only support a single environment"
-        # the gymnasium.make arguments every env shares; the envs differ only in the task's env_kwargs
-        self.make_kwargs = dict(
-            robot_uids=robot_uids,
-            obs_mode=obs_mode,
+        # The gymnasium.make arguments the evaluation sets itself; all others are the recording's.
+        # None of them changes the scene, the physics or the cameras.
+        self.evaluation_make_kwargs = dict(
+            obs_mode=obs_mode,              # which images ManiSkill renders in its step
+            depth_mode=depth_mode,          # which depth the cameras add (the builders assert the dataset's)
+            # the controller of the policy's actions, the recordings' pd_joint_pos for abs_joint_pos
             control_mode="pd_ee_pos_quat" if representation_space in ("relative_ee_pose", "abs_ee_pose") else "pd_joint_pos",
-            num_envs=n_envs,
-            max_episode_steps=max_steps,
-            sim_backend=sim_backend,
-            sensor_configs=dict(shader_pack=shader),
-            human_render_camera_configs=dict(shader_pack=shader),
-            depth_mode=depth_mode,
+            max_episode_steps=max_steps,    # when a rollout that has not succeeded stops
         )
         # `maniskill_env_obs_wrapper_builder` is a functools.partial from hydra with
         # perception-specific params defined in the config
@@ -120,17 +127,25 @@ class ManiSkillRunner(BaseRunner):
         self.n_action_steps = n_action_steps
         self.max_steps = max_steps
 
-        # A rollout from a dataset episode runs in the env with that episode's recorded env_kwargs
-        # (e.g. its piece), one without in the env with the configured ones.
-        self.env_kwargs = dict(env_kwargs or {})
         self.envs = {}
-        self.env = self._env(self.env_kwargs)
+        self.env = self._env(recorded_env(discover_dataset_paths(dataset_path)[0]))
+        self.workers = []   # connections to the rollout worker processes, started on the first run
 
-    def _env(self, env_kwargs: dict):
-        """The wrapped env with these task env_kwargs, built on first use."""
-        key = tuple(sorted(env_kwargs.items()))
+    def _env(self, recorded: dict):
+        """The wrapped env a demonstration was recorded in (recorded_env of its dataset), with the
+        evaluation's own make arguments in place of the recorded ones; built on first use."""
+        env_id = recorded['env_id']
+        assert env_id == self.task_name, f"the dataset was recorded in {env_id}, but the task's env is {self.task_name}"
+        # The env sets its own physics and control rate, so the recorded rate is checked, not passed.
+        make_kwargs = {key: value for key, value in recorded['env_kwargs'].items() if key != "sim_config"}
+        make_kwargs.update(self.evaluation_make_kwargs)
+        key = json.dumps([env_id, make_kwargs], sort_keys=True)
         if key not in self.envs:
-            base_env = gymnasium.make(self.task_name, **self.make_kwargs, **env_kwargs)
+            base_env = gymnasium.make(env_id, **make_kwargs)
+            rate = (base_env.unwrapped.sim_freq, base_env.unwrapped.control_freq)
+            assert rate == (recorded['sim_freq'], recorded['control_freq']), (
+                f"{env_id} runs at sim_freq/control_freq {rate}, its demonstrations were recorded at "
+                f"{(recorded['sim_freq'], recorded['control_freq'])}")
             env = self.maniskill_env_obs_wrapper_builder(base_env=base_env, device=self.device)
             env = AttentionOverlayWrapper(env)     # recolors the scene which gets captured in the recorded frames
             env = SimpleVideoRecordingWrapper(env)
@@ -151,40 +166,81 @@ class ManiSkillRunner(BaseRunner):
         """Rolls out eval_episodes episodes, from the start states of the dataset's episodes if
         given: those of its global train/val mask, shuffled with episode_seed (in order if None),
         cycling when eval_episodes exceeds them. train.py passes the epoch, so each evaluation
-        draws other episodes, and runs of the same experiment draw the same ones at an epoch."""
-        policy_device = policy.device   # obs tensors must match the policy's weights, not the sim device
+        draws other episodes, and runs of the same experiment draw the same ones at an epoch.
+        With num_workers > 1 worker processes roll them out in parallel. Every rollout starts in a
+        rebuilt scene and seeds the policy's sampling noise with its index, so it does not depend
+        on the process it runs in or on the episodes before it."""
         self.rollout_dataset = dataset   # callbacks read the episodes and their split from it
-        if dataset is not None:
-            # NOTE: global_train_mask is set to the val_mask in the validation dataset.
-            episodes = np.where(dataset.global_train_mask)[0]
-            assert len(episodes) > 0, (
-                "the dataset holds no episodes to draw rollout initial states from -- "
-                "with val_ratio=0 and max_train_episodes unset nothing is held out for "
-                "validation, so pass dataset=None to roll out from random initial states")
-            if episode_seed is not None:
-                episodes = np.random.default_rng(episode_seed).permutation(episodes)
+        episodes = self._episodes(dataset, episode_seed)
+        if self.num_workers > 1:
+            results = self._run_in_workers(policy, episodes, prefix)
+        else:
+            for cb in self.callbacks:
+                cb.at_run_start(self, policy)
+            results = [self._run_episode(policy, episode, prefix)
+                       for episode in tqdm.tqdm(episodes, desc=f"Eval ManiSkill {self.task_name}",
+                                                leave=False, mininterval=self.tqdm_interval_sec)]
 
-        all_traj_rewards: List[float] = []
-        all_success_rates: List[float] = []
-        all_num_steps_to_success: List[float] = []
+        success_rates = [float(result['is_success']) for result in results]
+        steps_to_success = [result['steps_to_success'] for result in results if result['steps_to_success'] is not None]
+        log_data = dict()
+        log_data['mean_traj_rewards'] = np.mean([result['traj_reward'] for result in results])
+        log_data['mean_success_rates'] = np.mean(success_rates)
+        cprint(f"mean_success_rates: {log_data['mean_success_rates']}", 'green')
 
-        for cb in self.callbacks:
-            cb.at_run_start(self, policy)
+        if len(steps_to_success) > 0:
+            log_data["steps_p25"] = np.percentile(steps_to_success, 25)
+            log_data["steps_median"] = np.median(steps_to_success)
+            log_data["steps_p75"] = np.percentile(steps_to_success, 75)
+        else:
+            # Penalize with max horizon to visually indicate failure
+            log_data["steps_p25"] = self.max_steps
+            log_data["steps_median"] = self.max_steps
+            log_data["steps_p75"] = self.max_steps
 
-        for episode_idx in tqdm.tqdm(range(self.eval_episodes),
-                                     desc=f"Eval ManiSkill {self.task_name}",
-                                     leave=False, mininterval=self.tqdm_interval_sec):
+        for index, cb in enumerate(self.callbacks):
+            self._safe_callback(cb, "at_run_end", prefix=prefix, log_data=log_data,
+                                records=[result['callback_records'][index] for result in results])
 
-            env = self.env
-            init_state = None
-            expert_trajectory = None
-            if dataset is not None:
-                # get_episode_init_data handles multi-buffer routing internally.
-                episode = episodes[episode_idx % len(episodes)]
-                init_state, expert_trajectory = dataset.get_episode_init_data(episode)
-                env = self._env({key: dataset.episode_env_kwargs(episode)[key] for key in self.env_kwargs})
+        return log_data
 
-            obs = env.reset(options={'init_state': init_state} if init_state is not None else None)
+    def _episodes(self, dataset, episode_seed):
+        """What each rollout needs, in rollout order: its index, its start state, its
+        demonstration and the env it was recorded in (None without a dataset: random start states
+        in the env of the first dataset)."""
+        if dataset is None:
+            return [dict(index=index, init_state=None, expert_trajectory=None, recorded_env=None)
+                    for index in range(self.eval_episodes)]
+        # NOTE: global_train_mask is set to the val_mask in the validation dataset.
+        dataset_episodes = np.where(dataset.global_train_mask)[0]
+        assert len(dataset_episodes) > 0, (
+            "the dataset holds no episodes to draw rollout initial states from -- "
+            "with val_ratio=0 and max_train_episodes unset nothing is held out for "
+            "validation, so pass dataset=None to roll out from random initial states")
+        if episode_seed is not None:
+            dataset_episodes = np.random.default_rng(episode_seed).permutation(dataset_episodes)
+        episodes = []
+        for index in range(self.eval_episodes):
+            dataset_episode = dataset_episodes[index % len(dataset_episodes)]
+            # get_episode_init_data handles multi-buffer routing internally.
+            init_state, expert_trajectory = dataset.get_episode_init_data(dataset_episode)
+            episodes.append(dict(index=index, init_state=init_state, expert_trajectory=expert_trajectory,
+                                 recorded_env=dataset.episode_recorded_env(dataset_episode)))
+        return episodes
+
+    def _run_episode(self, policy: BasePolicy, episode: dict, prefix: str) -> dict:
+        """One rollout (an entry of _episodes): whether it succeeded, its reward, its steps to
+        success and every callback's record of it."""
+        policy_device = policy.device   # obs tensors must match the policy's weights, not the sim device
+        episode_idx, init_state, expert_trajectory = episode['index'], episode['init_state'], episode['expert_trajectory']
+        env = self.env if episode['recorded_env'] is None else self._env(episode['recorded_env'])
+
+        with torch.random.fork_rng(devices=[policy_device]):
+            torch.manual_seed(episode_idx)
+            # A rebuilt scene (reconfigure, 0.07 s), since PhysX results depend on the scene's
+            # earlier episodes, which differ between the worker processes.
+            options = dict(reconfigure=True) if init_state is None else dict(reconfigure=True, init_state=init_state)
+            obs = env.reset(options=options)
             if not self._obs_shape_validated:
                 self._validate_obs_shape(obs)
             policy.reset()
@@ -242,45 +298,54 @@ class ManiSkillRunner(BaseRunner):
                 done = bool(done)
                 is_success = is_success or _extract_success(info)
 
-            if is_success and isinstance(info, dict) and 'elapsed_steps' in info:
-                all_num_steps_to_success.append(info["elapsed_steps"][-1].item())
-            all_success_rates.append(float(is_success))
-            all_traj_rewards.append(float(traj_reward))
+        steps_to_success = None
+        if is_success and isinstance(info, dict) and 'elapsed_steps' in info:
+            steps_to_success = info["elapsed_steps"][-1].item()
+        callback_records = [
+            self._safe_callback(cb, "at_episode_end", episode_idx=episode_idx, is_success=is_success, prefix=prefix,
+                                env=env, expert_trajectory=expert_trajectory, info=info)
+            for cb in self.callbacks]
+        return dict(index=episode_idx, is_success=is_success, traj_reward=float(traj_reward),
+                    steps_to_success=steps_to_success, callback_records=callback_records)
 
-            for cb in self.callbacks:
-                self._safe_callback(
-                    cb, 
-                    "at_episode_end", 
-                    episode_idx=episode_idx,
-                    is_success=is_success, 
-                    prefix=prefix, 
-                    env=env,
-                    expert_trajectory=expert_trajectory, 
-                    info=info
-                )
+    def _run_in_workers(self, policy: BasePolicy, episodes: List[dict], prefix: str) -> List[dict]:
+        """_run_episode of every episode, in num_workers worker processes, each taking the next
+        episode as soon as it has finished one; the results in episode order."""
+        # The policy and its weights go to the workers as pickled bytes. Tensors sent as they are
+        # travel as shared-memory file descriptors, of which a cluster process may open 1024.
+        if not self.workers:
+            context = torch.multiprocessing.get_context("spawn")
+            worker_policy = pickle.dumps(copy.deepcopy(policy).cpu())
+            worker_kwargs = dict(self.init_kwargs, num_workers=1)
+            for _ in range(self.num_workers):
+                connection, worker_connection = context.Pipe()
+                context.Process(target=_rollout_worker, args=(worker_kwargs, worker_policy, worker_connection),
+                                daemon=True).start()
+                self.workers.append(connection)
 
-        def _mean(lst):
-            return sum(lst) / len(lst) if lst else 0.0
-
-        log_data = dict()
-        log_data['mean_traj_rewards'] = _mean(all_traj_rewards)
-        log_data['mean_success_rates'] = _mean(all_success_rates)
-        cprint(f"mean_success_rates: {_mean(all_success_rates)}", 'green')
-
-        if len(all_num_steps_to_success) > 0:
-            log_data["steps_p25"] = np.percentile(all_num_steps_to_success, 25)
-            log_data["steps_median"] = np.median(all_num_steps_to_success)
-            log_data["steps_p75"] = np.percentile(all_num_steps_to_success, 75)
-        else:
-            # Penalize with max horizon to visually indicate failure
-            log_data["steps_p25"] = self.max_steps
-            log_data["steps_median"] = self.max_steps
-            log_data["steps_p75"] = self.max_steps
-
-        for cb in self.callbacks:
-            self._safe_callback(cb, "at_run_end", prefix=prefix, log_data=log_data)
-
-        return log_data
+        state_dict = pickle.dumps({key: value.detach().cpu() for key, value in policy.state_dict().items()})
+        for connection in self.workers:
+            connection.send(('run', state_dict, prefix))
+        pending = list(episodes)
+        busy = []
+        for connection in self.workers[:len(pending)]:
+            connection.send(('episode', pending.pop(0)))
+            busy.append(connection)
+        results = {}
+        with tqdm.tqdm(total=len(episodes), desc=f"Eval ManiSkill {self.task_name} ({self.num_workers} workers)",
+                       leave=False, mininterval=self.tqdm_interval_sec) as progress:
+            while busy:
+                for connection in wait(busy):
+                    status, payload = connection.recv()
+                    if status == 'error':
+                        raise RuntimeError(f"a rollout worker failed:\n{payload}")
+                    results[payload['index']] = payload
+                    progress.update()
+                    if pending:
+                        connection.send(('episode', pending.pop(0)))
+                    else:
+                        busy.remove(connection)
+        return [results[episode['index']] for episode in episodes]
 
     def _validate_obs_shape(self, obs):
         """
@@ -297,9 +362,34 @@ class ManiSkillRunner(BaseRunner):
 
     def _safe_callback(self, cb: EvalCallback, method: str, **kwargs):
         try:
-            getattr(cb, method)(self, **kwargs)
+            return getattr(cb, method)(self, **kwargs)
         except Exception as e:
             cprint(f"[{cb.__class__.__name__}.{method}] failed: {e}", "red")
+
+
+def _rollout_worker(runner_kwargs: dict, pickled_policy: bytes, connection):
+    """A rollout worker process: builds its own runner (envs and callbacks) and rolls out the
+    episodes the main process sends, with the weights it sends at the start of every run."""
+    torch.set_num_threads(1)
+    runner = ManiSkillRunner(**runner_kwargs)
+    policy = pickle.loads(pickled_policy).eval()
+    while True:
+        try:
+            message = connection.recv()
+        except EOFError:    # the main process has closed the connection or ended
+            return
+        try:
+            if message[0] == 'run':
+                _, pickled_state_dict, prefix = message
+                # after loading, since the normalizer loads its state as new tensors on the state's device
+                policy.load_state_dict(pickle.loads(pickled_state_dict))
+                policy.to(runner.device)
+                for cb in runner.callbacks:
+                    cb.at_run_start(runner, policy)
+            else:
+                connection.send(('result', runner._run_episode(policy, message[1], prefix)))
+        except Exception:
+            connection.send(('error', traceback.format_exc()))
 
 
 if __name__ == "__main__":
