@@ -38,6 +38,7 @@ from diffusion_policy_3d.gym_util.video_recording_wrapper import SimpleVideoReco
 from diffusion_policy_3d.gym_util.multistep_wrapper import MultiStepWrapper
 from diffusion_policy_3d.env.maniskill.relative_ee_control_wrapper import RelativeEEControlWrapper
 from diffusion_policy_3d.env.maniskill.attention_overlay_wrapper import AttentionOverlayWrapper
+from diffusion_policy_3d.env.maniskill.actor_pose_recording_wrapper import ActorPoseRecordingWrapper
 
 
 def _find_wrapper(env, wrapper_cls):
@@ -370,32 +371,39 @@ class GripperEvents:
 
 
 class GraspDeviationCallback(EvalCallback):
-    """How far the policy's grasp is from the demonstration of the same start state, and how
-    much the actor moves in the hand afterwards, next to the same for the demonstration.
-
-    Every rollout starts from a dataset episode's start state, so that episode's demonstration
-    is the oracle's grasp for exactly this start. The grasp moment is the first step whose
-    gripper action drops below 0 (GripperEvents). The policy's poses are read at the end of the
-    action chunk holding that step, k steps after it, so the demonstration is read k steps after
-    its own grasp:
-      grasp error    tcp pose of the policy vs the demonstration at that moment
-      in-hand slip   change of the actor's pose in the tcp frame from that moment to the last
-                     chunk end before the release (the first gripper action above 0 after the
-                     grasp), or to the last step if the gripper never opens again; for the
-                     demonstration, to the step before its release or to its last step
+    """How precisely the policy grasps the piece, next to the same for the demonstration of the
+    same start state (every rollout starts from a dataset episode's start state, so that
+    episode's demonstration is the oracle's grasp for exactly this start). The close command is
+    the first gripper action below 0 (GripperEvents).
+      grasp pose error     tcp pose of the policy vs the demonstration, each at the step its
+                           close command is issued, before the fingers move; the policy's by
+                           forward kinematics of the joint positions MultiStepWrapper records
+                           every step, since callbacks read the env at action-chunk ends only
+      grasp piece displacement
+                           how far the gripper moves the piece while grasping it: translation and
+                           rotation angle of the piece from its start pose to the step at which the
+                           fingers have stopped closing, or to the last step before the piece rises
+                           if that comes first (the demonstrations stop the fingers 8 steps after
+                           the close command and start the lift one step later, moving the piece
+                           sideways with the hand one step before it rises); from the poses
+                           ActorPoseRecordingWrapper records every step; the same for the
+                           demonstration
     Logs median / p5 / p95 / max of the policy's metrics and how many rollouts closed the
-    gripper, and plots every rollout over the actor's start yaw, with the start yaws of the
+    gripper, and plots every rollout over the piece's start yaw, with the start yaws of the
     training episodes as ticks.
 
-    Requires a dataset whose expert trajectory holds tcp_pose, gripper_action and actor_poses
+    Requires the joint positions as proprio (abs_joint_pos), ActorPoseRecordingWrapper and a
+    dataset whose expert trajectory holds tcp_pose, gripper_action and actor_poses
     (WristCamPCDMemmapManiskillDataset).
     """
 
-    PANELS = [[('grasp_position_error_mm', 'grasp position error [mm]'),
-               ('grasp_rotation_error_deg', 'grasp rotation error [deg]')],
-              [('slip_translation_mm', 'in-hand slip, translation [mm]'),
-               ('slip_rotation_deg', 'in-hand slip, rotation [deg]')]]
+    PANELS = [[('grasp_position_error_mm', 'grasp pose error: position [mm]'),
+               ('grasp_rotation_error_deg', 'grasp pose error: rotation [deg]')],
+              [('grasp_piece_displacement_mm', 'grasp piece displacement: translation [mm]'),
+               ('grasp_piece_displacement_deg', 'grasp piece displacement: rotation [deg]')]]
     POLICY_COLOR, DEMONSTRATION_COLOR, TICK_COLOR = '#2a78d6', '#eb6834', '#9a9a96'
+    FINGERS_STOPPED = 1e-5  # [m] change of the finger opening in one step below which the fingers have stopped closing
+    LIFT_HEIGHT = 1e-4      # [m] rise above the start height from which the piece counts as lifted; closing raises it <= 0.04 mm
 
     def __init__(self, actor_name: str):
         self.actor_name = actor_name
@@ -404,50 +412,59 @@ class GraspDeviationCallback(EvalCallback):
         self.rollouts: List[dict] = []
 
     def at_run_start(self, runner, policy):
+        assert runner.representation_space == "abs_joint_pos", "the grasp pose error needs the joint positions as proprio"
         self.rollouts = []
 
     def before_episode_start_after_env_reset(self, runner, *, episode_idx, init_state, expert_trajectory):
         self.demonstration = expert_trajectory
         self.start_yaw = _yaw_deg(init_state['actor_poses'][self.actor_key])
         self.gripper.reset()
-        self.grasp = None
+        self.close_step = self.tcp_at_close = None
 
     def after_action_predict(self, runner, *, obs_dict, action, action_dict, policy, env):
         self.gripper.chunk_predicted(action, env)
 
-    def _tcp_and_actor_pose(self, env):
-        return (_pose_matrix(_find_env_attr(env, "agent").tcp.pose.raw_pose[0].cpu().numpy()),
-                _pose_matrix(_find_env_attr(env, "scene").actors[self.actor_name].pose.raw_pose[0].cpu().numpy()))
+    @staticmethod
+    def _tcp_pose(env, joint_positions):
+        """(4, 4) world pose of the tcp at these joint positions."""
+        robot = _find_env_attr(env, "agent").robot
+        model = robot.create_pinocchio_model()
+        model.compute_forward_kinematics(joint_positions.cpu().numpy())
+        tcp = model.get_link_pose([link.name for link in robot.get_links()].index(_find_env_attr(env, "agent").tcp.name))
+        return _pose_matrix(robot.pose.raw_pose[0].cpu().numpy()) @ _pose_matrix(np.concatenate([tcp.p, tcp.q]))
 
-    def _demonstration_tcp_and_actor_pose(self, step):
-        return (_pose_matrix(self.demonstration['tcp_pose'][step]),
-                _pose_matrix(self.demonstration['actor_poses'][self.actor_key][step]))
+    @classmethod
+    def _piece_displacement(cls, piece_poses, joint_positions, close_step):
+        """Translation [mm] and rotation [deg] of the piece from its first pose to the step at
+        which the fingers have stopped closing after close_step, or to the last step before it
+        rises if that comes first. piece_poses (steps, 7) and joint_positions (steps, 9), [i]
+        before the i-th action."""
+        last = len(piece_poses) - 1
+        finger_opening = joint_positions[close_step:, 7] + joint_positions[close_step:, 8]
+        stopped = np.flatnonzero(np.abs(np.diff(finger_opening)) < cls.FINGERS_STOPPED)
+        risen = np.flatnonzero(piece_poses[:, 2] - piece_poses[0, 2] > cls.LIFT_HEIGHT)
+        end = min(close_step + 1 + stopped[0] if len(stopped) > 0 else last, risen[0] - 1 if len(risen) > 0 else last)
+        return _pose_change(_pose_matrix(piece_poses[0]), _pose_matrix(piece_poses[end]))
 
     def after_env_step(self, runner, *, obs, action, reward, done, info, policy, env):
-        steps_since_grasp, _ = self.gripper.chunk_executed(env)
-        if steps_since_grasp is not None:
-            demonstration_grasp, _ = _demonstration_grasp_and_release(self.demonstration['gripper_action'])
-            demonstration_step = min(demonstration_grasp + steps_since_grasp, len(self.demonstration['tcp_pose']) - 1)
-            self.grasp = dict(policy=self._tcp_and_actor_pose(env),
-                              demonstration=self._demonstration_tcp_and_actor_pose(demonstration_step))
-            self.before_release = self.grasp['policy']
-        elif self.gripper.closed and not self.gripper.released:
-            self.before_release = self._tcp_and_actor_pose(env)
+        steps_since_close, _ = self.gripper.chunk_executed(env)
+        if steps_since_close is not None:
+            joint_positions = _find_wrapper(env, MultiStepWrapper).traj_agent_proprio  # [i]: before the i-th action
+            self.close_step = len(joint_positions) - 1 - steps_since_close
+            self.tcp_at_close = self._tcp_pose(env, joint_positions[self.close_step])
 
     def at_episode_end(self, runner, *, episode_idx, is_success, prefix, env, expert_trajectory, info):
-        rollout = dict(start_yaw=self.start_yaw, is_success=is_success, closed=self.grasp is not None)
-        if self.grasp is not None:
-            (policy_tcp, policy_actor), (demonstration_tcp, demonstration_actor) = self.grasp['policy'], self.grasp['demonstration']
-            policy_tcp_end, policy_actor_end = self.before_release
-            _, demonstration_release = _demonstration_grasp_and_release(self.demonstration['gripper_action'])
-            demonstration_tcp_end, demonstration_actor_end = self._demonstration_tcp_and_actor_pose(
-                -1 if demonstration_release is None else demonstration_release - 1)
-            rollout['grasp_position_error_mm'], rollout['grasp_rotation_error_deg'] = _pose_change(demonstration_tcp, policy_tcp)
-            rollout['slip_translation_mm'], rollout['slip_rotation_deg'] = _pose_change(
-                np.linalg.inv(policy_tcp) @ policy_actor, np.linalg.inv(policy_tcp_end) @ policy_actor_end)
-            rollout['demonstration_slip_translation_mm'], rollout['demonstration_slip_rotation_deg'] = _pose_change(
-                np.linalg.inv(demonstration_tcp) @ demonstration_actor,
-                np.linalg.inv(demonstration_tcp_end) @ demonstration_actor_end)
+        rollout = dict(start_yaw=self.start_yaw, is_success=is_success, closed=self.close_step is not None)
+        if self.close_step is not None:
+            demonstration_close, _ = _demonstration_grasp_and_release(self.demonstration['gripper_action'])
+            rollout['grasp_position_error_mm'], rollout['grasp_rotation_error_deg'] = _pose_change(
+                _pose_matrix(self.demonstration['tcp_pose'][demonstration_close]), self.tcp_at_close)
+            joint_positions = np.stack([qpos.cpu().numpy() for qpos in _find_wrapper(env, MultiStepWrapper).traj_agent_proprio])
+            rollout['grasp_piece_displacement_mm'], rollout['grasp_piece_displacement_deg'] = self._piece_displacement(
+                _find_wrapper(env, ActorPoseRecordingWrapper).get_actor_poses(self.actor_name), joint_positions, self.close_step)
+            rollout['demonstration_grasp_piece_displacement_mm'], rollout['demonstration_grasp_piece_displacement_deg'] = \
+                self._piece_displacement(self.demonstration['actor_poses'][self.actor_key],
+                                         self.demonstration['agent_proprio'], demonstration_close)
         self.rollouts.append(rollout)
 
     def at_run_end(self, runner, *, prefix, log_data):

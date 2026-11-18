@@ -1,7 +1,7 @@
 """Single, representation-agnostic ManiSkill evaluation runner.
 
   * The env's perception-specific wrappers are built by the `maniskill_env_obs_wrapper_builder`
-    callable selected in config. Shared wrappers (video recording -> multi-step 
+    callable selected in config. Shared wrappers (video recording -> actor pose recording -> multi-step 
     -> optional relative-EE control) are applied in `_env`, which builds one env per value of the
     task's env_kwargs (a rollout from a dataset episode uses that episode's recorded ones).
     The runner injects the shared runtime params (base_env, device, representation_space,
@@ -29,6 +29,7 @@ from diffusion_policy_3d.env_runner.base_runner import BaseRunner
 from diffusion_policy_3d.env_runner.maniskill_callbacks import EvalCallback
 from diffusion_policy_3d.env.maniskill.relative_ee_control_wrapper import RelativeEEControlWrapper
 from diffusion_policy_3d.env.maniskill.attention_overlay_wrapper import AttentionOverlayWrapper
+from diffusion_policy_3d.env.maniskill.actor_pose_recording_wrapper import ActorPoseRecordingWrapper
 from diffusion_policy_3d.gym_util.multistep_wrapper import MultiStepWrapper
 from diffusion_policy_3d.gym_util.video_recording_wrapper import SimpleVideoRecordingWrapper
 from termcolor import cprint
@@ -136,6 +137,7 @@ class ManiSkillRunner(BaseRunner):
             env = self.maniskill_env_obs_wrapper_builder(base_env=base_env, device=self.device)
             env = AttentionOverlayWrapper(env)     # recolors the scene which gets captured in the recorded frames
             env = SimpleVideoRecordingWrapper(env)
+            env = ActorPoseRecordingWrapper(env, base_env.unwrapped)
             env = MultiStepWrapper(
                 env,
                 n_obs_steps=self.n_obs_steps,
