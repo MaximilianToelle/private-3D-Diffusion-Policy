@@ -141,6 +141,7 @@ def fused_pcd(
     agent_proprio_dim,
     video_cam_name,
     scene_representation,
+    point_normals,
     dataset_path,
 ):
     """
@@ -168,6 +169,7 @@ def fused_pcd(
         video_cam_name=video_cam_name,
         scene_representation=composed,
         segmented_body_names=composed["segmented_robot_links"] + list(moving_actors.pop()),
+        point_normals=point_normals,
         device=device,
     )
 

@@ -84,7 +84,8 @@ class FusedPCDManiSkillDP3Wrapper(ManiSkillDP3BaseObsWrapper):
     Fuses every camera of the current step with perception_utils.fused_pcd, the function
     convert_to_fused_pcd_memmap.py builds the dataset with, and reduces the result to
     ``num_points`` by farthest-point sampling without a random start, as the validation path
-    of the PointCloudFPS augmentation does. The random subset fused_pcd draws comes from a
+    of the PointCloudFPS augmentation does. With point_normals every point carries its unit
+    surface normal as three more channels. The random subset fused_pcd draws comes from a
     generator reseeded at every reset, so a start state yields the same subsets in every
     evaluation as long as the rendered images are the same.
 
@@ -98,11 +99,12 @@ class FusedPCDManiSkillDP3Wrapper(ManiSkillDP3BaseObsWrapper):
     POOL_SEED = 0
 
     def __init__(self, env, representation_space, agent_proprio_dim, video_cam_name, scene_representation,
-                 segmented_body_names, device):
+                 segmented_body_names, point_normals, device):
         # Perception params must be set BEFORE super().__init__() (which calls
         # _perception_observation_space, reading self.num_points).
         self.scene_representation = scene_representation
         self.num_points = scene_representation["num_points"]
+        self.point_normals = point_normals
         self.compute_device = torch.device(device)
         self.generator = torch.Generator(device=self.compute_device)
 
@@ -118,7 +120,7 @@ class FusedPCDManiSkillDP3Wrapper(ManiSkillDP3BaseObsWrapper):
         return {
             'point_cloud': spaces.Box(
                 low=-float('inf'), high=float('inf'),
-                shape=(self.num_points, 3), dtype='float32'),
+                shape=(self.num_points, 6 if self.point_normals else 3), dtype='float32'),
         }
 
     def _reset_perception_state(self):
@@ -171,8 +173,9 @@ class FusedPCDManiSkillDP3Wrapper(ManiSkillDP3BaseObsWrapper):
                 params['intrinsic_cv'][0].to(self.compute_device),
                 cam2world_cv_from_extrinsic_cv(params['extrinsic_cv'][0].to(self.compute_device)),
             ))
-        points, _ = fused_pcd(*zip(*frames), self.is_body, self.scene_representation, self.generator)
+        points, normals = fused_pcd(*zip(*frames), self.is_body, self.scene_representation, self.generator)
+        cloud = torch.cat([points, normals], dim=-1) if self.point_normals else points
         return {
             'point_cloud': farthest_point_downsample(
-                points.unsqueeze(0), self.num_points, random_start_point=False).squeeze(0),
+                cloud.unsqueeze(0), self.num_points, random_start_point=False).squeeze(0),
         }

@@ -82,6 +82,8 @@ class DP3(BasePolicy):
 
         self.use_pc_color = use_pc_color
         self.pointnet_type = pointnet_type
+        # the plain PointNet reads the positions only, of clouds that may carry more channels
+        self.xyz_only = not use_pc_color and pointnet_type == "pointnet"
         cprint(f"[DiffusionUnetHybridPointcloudPolicy] use_pc_color: {self.use_pc_color}", "yellow")
         cprint(f"[DiffusionUnetHybridPointcloudPolicy] pointnet_type: {self.pointnet_type}", "yellow")
 
@@ -216,7 +218,7 @@ class DP3(BasePolicy):
         # normalize input
         nobs = self.normalizer.normalize(obs_dict)
         # this_n_point_cloud = nobs['imagin_robot'][..., :3] # only use coordinate
-        if not self.use_pc_color:
+        if self.xyz_only:
             nobs['point_cloud'] = nobs['point_cloud'][..., :3]
         this_n_point_cloud = nobs['point_cloud']
         
@@ -296,7 +298,7 @@ class DP3(BasePolicy):
         nobs = self.normalizer.normalize(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
 
-        if not self.use_pc_color:
+        if self.xyz_only:
             nobs['point_cloud'] = nobs['point_cloud'][..., :3]
         
         batch_size = nactions.shape[0]

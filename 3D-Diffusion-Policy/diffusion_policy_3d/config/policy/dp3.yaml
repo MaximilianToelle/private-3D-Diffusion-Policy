@@ -11,7 +11,8 @@ representation_space: abs_joint_pos
 network:
   _target_: diffusion_policy_3d.policy.dp3.DP3
   use_pc_color: false
-  pointnet_type: "pointnet"
+  # pointnet_normals (PointNetEncoderXYZNormals) when the scene representation adds each point's normal
+  pointnet_type: ${eval:'"pointnet_normals" if ${scene_representation.point_normals} else "pointnet"'}
   pointcloud_encoder_cfg:
     in_channels: 3
     out_channels: ${policy.network.encoder_output_dim}

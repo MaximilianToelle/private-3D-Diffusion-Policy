@@ -41,7 +41,11 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
             num_train_episodes=None,
             held_out_start_yaw_deg=None,
             held_out_dataset_path=None,
+            point_normals=False,
             ):
+        """point_normals: every point also carries its unit surface normal as three more
+        channels, from the point_normal array of the fused_pcd datasets."""
+        self.point_normals = point_normals
         # Opens one memmap-backed replay buffer and one sampler per dataset (point_cloud is
         # (T, N, 3) f32, read through the OS page cache), splits train/val globally over all
         # of them and provides the global->local index mapping (dataset/multi_memmap_dataset.py).
@@ -76,7 +80,7 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
 
     def _sampler_keys(self):
         return (['point_cloud', 'num_valid_points', 'joint_pos_proprio',
-                 'joint_pos_action'] + self.actor_keys)
+                 'joint_pos_action'] + (['point_normal'] if self.point_normals else []) + self.actor_keys)
 
     def get_episode_init_data(self, global_episode_idx):
         """Init state + expert trajectory of one episode, used by the env runner to
@@ -128,6 +132,15 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
         normalizer['point_cloud'] = SingleFieldLinearNormalizer.create_center_radius(
             pos_min, pos_max,
             input_stats_dict={'min': pos_min, 'max': pos_max, 'mean': pos_mean, 'std': pos_std})
+        if self.point_normals:
+            # the unit normals pass unchanged (scale 1, offset 0)
+            positions = normalizer['point_cloud'].params_dict
+            normal_stats = {'min': -torch.ones(3), 'max': torch.ones(3), 'mean': torch.zeros(3), 'std': torch.ones(3)}
+            normalizer['point_cloud'] = SingleFieldLinearNormalizer.create_manual(
+                scale=torch.cat([positions['scale'].detach(), torch.ones(3)]),
+                offset=torch.cat([positions['offset'].detach(), torch.zeros(3)]),
+                input_stats_dict={key: torch.cat([positions['input_stats'][key].detach(), value])
+                                  for key, value in normal_stats.items()})
 
         # --- Actions and agent proprioception: per-DOF min/max (individual physical
         # ranges), gripper dims already in [-1, 1] -> identity ---
@@ -182,7 +195,9 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
                 # policy only consumes the first n_obs_steps of the horizon window.
                 # The pool is passed on with its padding, since PointCloudFPS reduces it to
                 # num_points on the GPU and needs num_valid_points as the per-cloud length.
-                'point_cloud': torch.from_numpy(sample['point_cloud'][:self.n_obs_steps].copy()),
+                'point_cloud': torch.from_numpy(np.concatenate(
+                    [sample['point_cloud'][:self.n_obs_steps]]
+                    + ([sample['point_normal'][:self.n_obs_steps]] if self.point_normals else []), axis=-1)),
                 'num_valid_points': torch.from_numpy(
                     sample['num_valid_points'][:self.n_obs_steps].astype(np.int64)),
                 'agent_proprio': torch.from_numpy(sample['joint_pos_proprio'][:self.n_obs_steps].astype(np.float32)),

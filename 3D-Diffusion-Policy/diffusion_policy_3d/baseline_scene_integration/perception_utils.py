@@ -9,6 +9,7 @@ from typing import List, Tuple
 
 import torch
 from pytorch3d.ops import sample_farthest_points
+from pytorch3d.ops.utils import masked_gather
 from torch.nn.utils.rnn import pad_sequence
 
 
@@ -140,8 +141,9 @@ def fused_pcd(depths_m, normals_gl, segmentations, intrinsics, cam2worlds_cv, is
 
 
 def farthest_point_downsample(points, num_points, lengths=None, random_start_point=True):
-    """Reduce every cloud of ``points`` (B, N, 3) to exactly (B, num_points, 3) by
-    farthest-point sampling.
+    """Reduce every cloud of ``points`` (B, N, C) to exactly (B, num_points, C) by
+    farthest-point sampling on the first three channels, the positions; further channels
+    (e.g. surface normals) come along with their points.
 
     Every point-based representation needs this reduction: the spatial-memory baseline
     reduces its accumulated memory, the single-step baseline the points of the current frame,
@@ -162,9 +164,9 @@ def farthest_point_downsample(points, num_points, lengths=None, random_start_poi
     assert smallest_cloud >= num_points, (
         f"cannot sample {num_points} points from a cloud of {smallest_cloud} -- pytorch3d "
         "would zero-pad silently instead of failing")
-    sampled, _ = sample_farthest_points(points, lengths=lengths, K=num_points,
+    _, indices = sample_farthest_points(points[..., :3], lengths=lengths, K=num_points,
                                         random_start_point=random_start_point)
-    return sampled
+    return masked_gather(points, indices)
 
 
 def farthest_point_pool(points, num_pool_points):

@@ -6,18 +6,22 @@
 # (Fast-FoundationStereo). The obs-wrapper builders assert it against each dataset's depth_key.
 depth: gt
 obs_mode: rgb+depth+segmentation   # rgb for the evaluation videos
+# true: every point also carries its unit surface normal in the base frame, as three more
+# channels (only the fused_pcd datasets store normals)
+point_normals: false
 
 # The policy's observation of the scene.
 shape_meta:
   point_cloud:
     shape:
       - ${scene_representation.params.num_points}
-      - 3
+      - ${eval:'6 if ${scene_representation.point_normals} else 3'}
     type: point_cloud
 obs_key_aliases: {}
 
 dataset:
   _target_: diffusion_policy_3d.dataset.maniskill_wrist_cam_pcd_memmap_dataset.WristCamPCDMemmapManiskillDataset
+  point_normals: ${scene_representation.point_normals}
 
 # Builds the perception wrappers of the evaluation env; the env_runner injects base_env and device.
 obs_wrapper_builder:
