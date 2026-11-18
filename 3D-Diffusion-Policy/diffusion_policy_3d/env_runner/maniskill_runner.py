@@ -168,8 +168,9 @@ class ManiSkillRunner(BaseRunner):
         cycling when eval_episodes exceeds them. train.py passes the epoch, so each evaluation
         draws other episodes, and runs of the same experiment draw the same ones at an epoch.
         With num_workers > 1 worker processes roll them out in parallel. Every rollout starts in a
-        rebuilt scene and seeds the policy's sampling noise with its index, so it does not depend
-        on the process it runs in or on the episodes before it."""
+        rebuilt scene and seeds the policy's sampling noise with episode_seed and its index, so it
+        does not depend on the process it runs in or on the episodes before it, every evaluation
+        draws new noise, and runs evaluated at the same epoch draw the same."""
         self.rollout_dataset = dataset   # callbacks read the episodes and their split from it
         episodes = self._episodes(dataset, episode_seed)
         if self.num_workers > 1:
@@ -205,12 +206,14 @@ class ManiSkillRunner(BaseRunner):
         return log_data
 
     def _episodes(self, dataset, episode_seed):
-        """What each rollout needs, in rollout order: its index, its start state, its
-        demonstration and the env it was recorded in (None without a dataset: random start states
-        in the env of the first dataset)."""
+        """What each rollout needs, in rollout order: its index, the seed of the policy's sampling
+        noise, its start state, its demonstration and the env it was recorded in (None without a
+        dataset: random start states in the env of the first dataset)."""
+        noise_seeds = [index if episode_seed is None else episode_seed * self.eval_episodes + index
+                       for index in range(self.eval_episodes)]
         if dataset is None:
-            return [dict(index=index, init_state=None, expert_trajectory=None, recorded_env=None)
-                    for index in range(self.eval_episodes)]
+            return [dict(index=index, noise_seed=noise_seeds[index], init_state=None, expert_trajectory=None,
+                         recorded_env=None) for index in range(self.eval_episodes)]
         # NOTE: global_train_mask is set to the val_mask in the validation dataset.
         dataset_episodes = np.where(dataset.global_train_mask)[0]
         assert len(dataset_episodes) > 0, (
@@ -224,7 +227,8 @@ class ManiSkillRunner(BaseRunner):
             dataset_episode = dataset_episodes[index % len(dataset_episodes)]
             # get_episode_init_data handles multi-buffer routing internally.
             init_state, expert_trajectory = dataset.get_episode_init_data(dataset_episode)
-            episodes.append(dict(index=index, init_state=init_state, expert_trajectory=expert_trajectory,
+            episodes.append(dict(index=index, noise_seed=noise_seeds[index], init_state=init_state,
+                                 expert_trajectory=expert_trajectory,
                                  recorded_env=dataset.episode_recorded_env(dataset_episode)))
         return episodes
 
@@ -236,7 +240,7 @@ class ManiSkillRunner(BaseRunner):
         env = self.env if episode['recorded_env'] is None else self._env(episode['recorded_env'])
 
         with torch.random.fork_rng(devices=[policy_device]):
-            torch.manual_seed(episode_idx)
+            torch.manual_seed(episode['noise_seed'])
             # A rebuilt scene (reconfigure, 0.07 s), since PhysX results depend on the scene's
             # earlier episodes, which differ between the worker processes.
             options = dict(reconfigure=True) if init_state is None else dict(reconfigure=True, init_state=init_state)
