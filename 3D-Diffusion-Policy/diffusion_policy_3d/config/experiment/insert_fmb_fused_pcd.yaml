@@ -1,0 +1,16 @@
+# @package _global_
+# (an experiment sets keys at the top level of the config, like base.yaml)
+# DP3 on the point cloud fused from all cameras, inserting an FMB piece into its peg board; the
+# rest as in lift_fmb_fused_pcd. Launch with the piece and, for the sparse variant, the scene
+# representation:
+#   python train.py --config-name=experiment/insert_fmb_fused_pcd task.piece=hexagon_large_h100 [scene_representation=fused_pcd_sparse]
+defaults:
+  - /experiment/lift_fmb_fused_pcd
+  - override /task: insert_fmb
+  - _self_
+
+name: insert_fmb_fused_pcd
+
+data:
+  # one converted dataset per piece and scene representation
+  dataset_path: ${repo_root:}/datasets/insert_fmb/${scene_representation.name}/${task.piece}

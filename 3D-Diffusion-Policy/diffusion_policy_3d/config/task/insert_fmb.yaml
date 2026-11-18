@@ -1,0 +1,14 @@
+# Insert an FMB piece into its hole in the peg board (InsertFmbObjectFr3Env-v1). The piece is
+# chosen at launch: task.piece=hexagon_large_h100 (FmbObject.name).
+
+piece: ???
+env_id: InsertFmbObjectFr3Env-v1
+env_kwargs:
+  piece: ${task.piece}
+max_steps: 400   # the env's own limit; the demonstrations take 187-259 steps
+shader: default  # sensor cameras: default (rasterizer) | rt, the one the recordings were rendered with
+callbacks:
+  - _target_: diffusion_policy_3d.env_runner.maniskill_callbacks.GraspDeviationCallback
+    actor_name: piece
+  - _target_: diffusion_policy_3d.env_runner.maniskill_callbacks.InsertionDeviationCallback
+    actor_name: piece

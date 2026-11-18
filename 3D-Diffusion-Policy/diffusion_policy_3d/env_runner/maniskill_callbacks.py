@@ -307,7 +307,7 @@ class TrajectoryPlotCallback(EvalCallback):
 
 
 # ---------------------------------------------------------------------------
-# Grasp deviation from the demonstration
+# Grasp and insertion deviation from the demonstration
 # ---------------------------------------------------------------------------
 def _pose_matrix(pose7):
     """[x, y, z, qw, qx, qy, qz] -> (4, 4)."""
@@ -328,19 +328,61 @@ def _yaw_deg(pose7):
     return (np.degrees(2 * np.arctan2(pose7[6], pose7[3])) + 180) % 360 - 180
 
 
+def _demonstration_grasp_and_release(gripper_action):
+    """Steps of the demonstration's grasp (first gripper action below 0) and release (first one
+    above 0 after the grasp, None if the gripper never opens again). The demonstrations ramp the
+    action between 1, open, and -1, closed."""
+    grasp = int(np.flatnonzero(gripper_action < 0)[0])
+    opening = np.flatnonzero(gripper_action[grasp:] > 0)
+    return grasp, grasp + int(opening[0]) if len(opening) > 0 else None
+
+
+class GripperEvents:
+    """The policy's grasp (first executed gripper action below 0) and release (first one above
+    0 after the grasp), as in _demonstration_grasp_and_release. Callbacks read the env at the end
+    of an action chunk, so each event comes with the number of steps the chunk executed from it
+    on."""
+
+    def reset(self):
+        self.closed = self.released = False
+
+    def chunk_predicted(self, action, env):
+        self.chunk_gripper_actions = action[:, -1].cpu().numpy()
+        self.steps_before_chunk = len(_find_wrapper(env, MultiStepWrapper).traj_agent_proprio) - 1
+
+    def chunk_executed(self, env):
+        """The steps executed from the grasp and from the release on, each None unless it
+        happened in this chunk."""
+        executed = len(_find_wrapper(env, MultiStepWrapper).traj_agent_proprio) - 1 - self.steps_before_chunk
+        actions = self.chunk_gripper_actions[:executed]
+        steps_since_grasp = steps_since_release = None
+        if not self.closed:
+            closing = np.flatnonzero(actions < 0)
+            if len(closing) == 0:
+                return None, None
+            self.closed, steps_since_grasp = True, executed - closing[0]
+            actions = actions[closing[0]:]
+        if not self.released:
+            opening = np.flatnonzero(actions > 0)
+            if len(opening) > 0:
+                self.released, steps_since_release = True, len(actions) - opening[0]
+        return steps_since_grasp, steps_since_release
+
+
 class GraspDeviationCallback(EvalCallback):
     """How far the policy's grasp is from the demonstration of the same start state, and how
     much the actor moves in the hand afterwards, next to the same for the demonstration.
 
     Every rollout starts from a dataset episode's start state, so that episode's demonstration
     is the oracle's grasp for exactly this start. The grasp moment is the first step whose
-    gripper action drops below 0 (the demonstrations ramp it from 1, open, to -1, closed, while
-    the tcp stands still). The policy's poses are read at the end of the action chunk holding
-    that step, k steps after it, so the demonstration is read k steps after its own first
-    closing step:
+    gripper action drops below 0 (GripperEvents). The policy's poses are read at the end of the
+    action chunk holding that step, k steps after it, so the demonstration is read k steps after
+    its own grasp:
       grasp error    tcp pose of the policy vs the demonstration at that moment
       in-hand slip   change of the actor's pose in the tcp frame from that moment to the last
-                     step of the rollout (of the demonstration, for the reference)
+                     chunk end before the release (the first gripper action above 0 after the
+                     grasp), or to the last step if the gripper never opens again; for the
+                     demonstration, to the step before its release or to its last step
     Logs median / p5 / p95 / max of the policy's metrics and how many rollouts closed the
     gripper, and plots every rollout over the actor's start yaw, with the start yaws of the
     training episodes as ticks.
@@ -349,12 +391,16 @@ class GraspDeviationCallback(EvalCallback):
     (WristCamPCDMemmapManiskillDataset).
     """
 
-    METRICS = ['grasp_position_error_mm', 'grasp_rotation_error_deg', 'slip_translation_mm', 'slip_rotation_deg']
+    PANELS = [[('grasp_position_error_mm', 'grasp position error [mm]'),
+               ('grasp_rotation_error_deg', 'grasp rotation error [deg]')],
+              [('slip_translation_mm', 'in-hand slip, translation [mm]'),
+               ('slip_rotation_deg', 'in-hand slip, rotation [deg]')]]
     POLICY_COLOR, DEMONSTRATION_COLOR, TICK_COLOR = '#2a78d6', '#eb6834', '#9a9a96'
 
     def __init__(self, actor_name: str):
         self.actor_name = actor_name
         self.actor_key = f'actor_pose_{actor_name}'
+        self.gripper = GripperEvents()
         self.rollouts: List[dict] = []
 
     def at_run_start(self, runner, policy):
@@ -363,11 +409,11 @@ class GraspDeviationCallback(EvalCallback):
     def before_episode_start_after_env_reset(self, runner, *, episode_idx, init_state, expert_trajectory):
         self.demonstration = expert_trajectory
         self.start_yaw = _yaw_deg(init_state['actor_poses'][self.actor_key])
+        self.gripper.reset()
         self.grasp = None
 
     def after_action_predict(self, runner, *, obs_dict, action, action_dict, policy, env):
-        self.chunk_gripper_actions = action[:, -1].cpu().numpy()
-        self.steps_before_chunk = len(_find_wrapper(env, MultiStepWrapper).traj_agent_proprio) - 1
+        self.gripper.chunk_predicted(action, env)
 
     def _tcp_and_actor_pose(self, env):
         return (_pose_matrix(_find_env_attr(env, "agent").tcp.pose.raw_pose[0].cpu().numpy()),
@@ -378,24 +424,24 @@ class GraspDeviationCallback(EvalCallback):
                 _pose_matrix(self.demonstration['actor_poses'][self.actor_key][step]))
 
     def after_env_step(self, runner, *, obs, action, reward, done, info, policy, env):
-        if self.grasp is not None:
-            return
-        executed = len(_find_wrapper(env, MultiStepWrapper).traj_agent_proprio) - 1 - self.steps_before_chunk
-        closing = np.flatnonzero(self.chunk_gripper_actions[:executed] < 0)
-        if len(closing) == 0:
-            return
-        steps_since_closing = executed - closing[0]
-        demonstration_closing = int(np.flatnonzero(self.demonstration['gripper_action'] < 0)[0])
-        demonstration_step = min(demonstration_closing + steps_since_closing, len(self.demonstration['tcp_pose']) - 1)
-        self.grasp = dict(policy=self._tcp_and_actor_pose(env),
-                          demonstration=self._demonstration_tcp_and_actor_pose(demonstration_step))
+        steps_since_grasp, _ = self.gripper.chunk_executed(env)
+        if steps_since_grasp is not None:
+            demonstration_grasp, _ = _demonstration_grasp_and_release(self.demonstration['gripper_action'])
+            demonstration_step = min(demonstration_grasp + steps_since_grasp, len(self.demonstration['tcp_pose']) - 1)
+            self.grasp = dict(policy=self._tcp_and_actor_pose(env),
+                              demonstration=self._demonstration_tcp_and_actor_pose(demonstration_step))
+            self.before_release = self.grasp['policy']
+        elif self.gripper.closed and not self.gripper.released:
+            self.before_release = self._tcp_and_actor_pose(env)
 
     def at_episode_end(self, runner, *, episode_idx, is_success, prefix, env, expert_trajectory, info):
         rollout = dict(start_yaw=self.start_yaw, is_success=is_success, closed=self.grasp is not None)
         if self.grasp is not None:
             (policy_tcp, policy_actor), (demonstration_tcp, demonstration_actor) = self.grasp['policy'], self.grasp['demonstration']
-            policy_tcp_end, policy_actor_end = self._tcp_and_actor_pose(env)
-            demonstration_tcp_end, demonstration_actor_end = self._demonstration_tcp_and_actor_pose(-1)
+            policy_tcp_end, policy_actor_end = self.before_release
+            _, demonstration_release = _demonstration_grasp_and_release(self.demonstration['gripper_action'])
+            demonstration_tcp_end, demonstration_actor_end = self._demonstration_tcp_and_actor_pose(
+                -1 if demonstration_release is None else demonstration_release - 1)
             rollout['grasp_position_error_mm'], rollout['grasp_rotation_error_deg'] = _pose_change(demonstration_tcp, policy_tcp)
             rollout['slip_translation_mm'], rollout['slip_rotation_deg'] = _pose_change(
                 np.linalg.inv(policy_tcp) @ policy_actor, np.linalg.inv(policy_tcp_end) @ policy_actor_end)
@@ -408,22 +454,133 @@ class GraspDeviationCallback(EvalCallback):
         closed = [rollout for rollout in self.rollouts if rollout['closed']]
         log_data['grasp_num_closed'] = len(closed)
         log_data['grasp_num_never_closed'] = len(self.rollouts) - len(closed)
-        for metric in self.METRICS:
-            values = np.array([rollout[metric] for rollout in closed])
-            if len(values) > 0:
-                log_data[f'{metric}_median'] = np.median(values)
-                log_data[f'{metric}_p5'], log_data[f'{metric}_p95'] = np.percentile(values, [5, 95])
-                log_data[f'{metric}_max'] = values.max()
+        _log_spread(log_data, closed, [metric for row in self.PANELS for metric, _ in row])
+        _save_deviation_plot_of_run(runner, self, closed, prefix, "grasp_deviation",
+                                    title=f"{prefix}: {len(closed)} of {len(self.rollouts)} rollouts closed the gripper")
 
-        dataset = runner.rollout_dataset
-        training_start_yaws = dataset.episode_start_yaws_deg()[dataset.training_episode_mask]
-        plot_dir = os.path.join(runner.output_dir, "eval_plots")
-        os.makedirs(plot_dir, exist_ok=True)
-        plot_path = os.path.join(plot_dir, f"{prefix}_grasp_deviation.png")
-        save_grasp_deviation_plot(closed, training_start_yaws, self.POLICY_COLOR, self.DEMONSTRATION_COLOR, self.TICK_COLOR,
-                                  title=f"{prefix}: {len(closed)} of {len(self.rollouts)} rollouts closed the gripper",
-                                  save_path=plot_path)
-        cprint(f"Saved grasp deviation plot to {plot_path}", "cyan")
+
+class InsertionDeviationCallback(EvalCallback):
+    """How far the piece is from its hole above the hole and at the policy's release, next to
+    the same for the demonstration of the same start state (InsertFmbObjectFr3Env).
+
+      above hole  the last action-chunk end at which the lifted piece's bottom is still above
+                  the board's top face, before it comes down to it (the env is read at chunk ends
+                  only, so the piece is up to one chunk's motion above the face); for the
+                  demonstration, its last step before the piece comes down
+      release     the policy's release (GripperEvents), read at the end of its action chunk, k
+                  steps after it, the demonstration k steps after its own release
+    At each moment: lateral offset of the piece frame's origin from the hole's in xy [mm], yaw
+    error modulo the shape's symmetry period [deg] and tilt [deg]; at the release also the height
+    above the seated pose [mm] (0: fully inserted, the board's height: on its top face). The
+    hole is the env's hole_pose, the pose of the seated piece; the board does not move during an
+    episode, so it is the demonstration's too.
+    Logs median / p5 / p95 / max of the policy's metrics and how many rollouts reached each
+    moment, and plots every rollout over the piece's start yaw like GraspDeviationCallback.
+    """
+
+    PANELS = [[('above_hole_lateral_offset_mm', 'above hole: lateral offset [mm]'),
+               ('above_hole_yaw_error_deg', 'above hole: yaw error [deg]'),
+               ('above_hole_tilt_deg', 'above hole: tilt [deg]')],
+              [('release_lateral_offset_mm', 'release: lateral offset [mm]'),
+               ('release_yaw_error_deg', 'release: yaw error [deg]'),
+               ('release_tilt_deg', 'release: tilt [deg]'),
+               ('release_height_above_seated_mm', 'release: height above seated [mm]')]]
+    POLICY_COLOR, DEMONSTRATION_COLOR, TICK_COLOR = GraspDeviationCallback.POLICY_COLOR, GraspDeviationCallback.DEMONSTRATION_COLOR, GraspDeviationCallback.TICK_COLOR
+    TOP_FACE_TOLERANCE = 0.001  # [m] above the board's top face that still counts as on it
+
+    def __init__(self, actor_name: str):
+        self.actor_name = actor_name
+        self.actor_key = f'actor_pose_{actor_name}'
+        self.gripper = GripperEvents()
+        self.rollouts: List[dict] = []
+
+    def at_run_start(self, runner, policy):
+        self.rollouts = []
+
+    def before_episode_start_after_env_reset(self, runner, *, episode_idx, init_state, expert_trajectory):
+        self.demonstration = expert_trajectory
+        self.start_yaw = _yaw_deg(init_state['actor_poses'][self.actor_key])
+        self.gripper.reset()
+        self.hole = self.last_above_face = self.above_hole = self.release = None
+
+    def after_action_predict(self, runner, *, obs_dict, action, action_dict, policy, env):
+        self.gripper.chunk_predicted(action, env)
+        if self.hole is None:
+            self.hole = _pose_matrix(_find_env_attr(env, "hole_pose").raw_pose[0].cpu().numpy())
+            self.symmetry_period_deg = _find_env_attr(env, "SYMMETRY_PERIOD_DEG")[_find_env_attr(env, "piece").shape]
+            self.board_height = _find_env_attr(env, "board").HEIGHT
+
+    def _above_face(self, pieces):
+        return pieces[..., 2, 3] - self.hole[2, 3] > self.board_height + self.TOP_FACE_TOLERANCE
+
+    def _errors(self, piece, moment):
+        """Every metric of the piece's pose relative to the hole, as <moment>_<metric>."""
+        relative = self.hole[:3, :3].T @ piece[:3, :3]
+        yaw = np.degrees(np.arctan2(relative[1, 0], relative[0, 0]))
+        period = self.symmetry_period_deg
+        return {f'{moment}_lateral_offset_mm': 1000 * np.linalg.norm(piece[:2, 3] - self.hole[:2, 3]),
+                f'{moment}_yaw_error_deg': abs((yaw + period / 2) % period - period / 2),
+                f'{moment}_tilt_deg': np.degrees(np.arccos(np.clip(relative[2, 2], -1, 1))),
+                f'{moment}_height_above_seated_mm': 1000 * (piece[2, 3] - self.hole[2, 3])}
+
+    def after_env_step(self, runner, *, obs, action, reward, done, info, policy, env):
+        _, steps_since_release = self.gripper.chunk_executed(env)
+        piece = _pose_matrix(_find_env_attr(env, "scene").actors[self.actor_name].pose.raw_pose[0].cpu().numpy())
+        if steps_since_release is not None:
+            self.release = piece, steps_since_release
+        if self.above_hole is None:
+            if self._above_face(piece):
+                self.last_above_face = piece
+            elif self.last_above_face is not None:
+                self.above_hole = self.last_above_face
+
+    def _demonstration_moments(self, steps_since_release):
+        pieces = np.stack([_pose_matrix(pose) for pose in self.demonstration['actor_poses'][self.actor_key]])
+        above_face = self._above_face(pieces)
+        lifted = int(np.flatnonzero(above_face)[0])
+        above_hole = lifted + int(np.flatnonzero(~above_face[lifted:])[0]) - 1
+        _, release = _demonstration_grasp_and_release(self.demonstration['gripper_action'])
+        return pieces[above_hole], pieces[min(release + steps_since_release, len(pieces) - 1)]
+
+    def at_episode_end(self, runner, *, episode_idx, is_success, prefix, env, expert_trajectory, info):
+        rollout = dict(start_yaw=self.start_yaw, is_success=is_success)
+        demonstration_above_hole, demonstration_release = self._demonstration_moments(0 if self.release is None else self.release[1])
+        policy_release = None if self.release is None else self.release[0]
+        for moment, policy_piece, demonstration_piece in (('above_hole', self.above_hole, demonstration_above_hole),
+                                                          ('release', policy_release, demonstration_release)):
+            if policy_piece is not None:
+                rollout.update(self._errors(policy_piece, moment))
+            rollout.update({f'demonstration_{key}': value for key, value in self._errors(demonstration_piece, moment).items()})
+        self.rollouts.append(rollout)
+
+    def at_run_end(self, runner, *, prefix, log_data):
+        log_data['insertion_num_above_hole'] = sum('above_hole_lateral_offset_mm' in rollout for rollout in self.rollouts)
+        log_data['insertion_num_released'] = sum('release_lateral_offset_mm' in rollout for rollout in self.rollouts)
+        _log_spread(log_data, self.rollouts, [metric for row in self.PANELS for metric, _ in row])
+        _save_deviation_plot_of_run(runner, self, self.rollouts, prefix, "insertion_deviation",
+                                    title=(f"{prefix}: {log_data['insertion_num_above_hole']} of {len(self.rollouts)} rollouts came down "
+                                           f"from above the board, {log_data['insertion_num_released']} released the piece"))
+
+
+def _log_spread(log_data, rollouts, metrics):
+    """median / p5 / p95 / max of each metric over the rollouts that hold it."""
+    for metric in metrics:
+        values = np.array([rollout[metric] for rollout in rollouts if metric in rollout])
+        if len(values) > 0:
+            log_data[f'{metric}_median'] = np.median(values)
+            log_data[f'{metric}_p5'], log_data[f'{metric}_p95'] = np.percentile(values, [5, 95])
+            log_data[f'{metric}_max'] = values.max()
+
+
+def _save_deviation_plot_of_run(runner, callback, rollouts, prefix, name, title):
+    dataset = runner.rollout_dataset
+    training_start_yaws = dataset.episode_start_yaws_deg(callback.actor_key)[dataset.training_episode_mask]
+    plot_dir = os.path.join(runner.output_dir, "eval_plots")
+    os.makedirs(plot_dir, exist_ok=True)
+    plot_path = os.path.join(plot_dir, f"{prefix}_{name}.png")
+    save_deviation_plot(rollouts, callback.PANELS, training_start_yaws, callback.POLICY_COLOR, callback.DEMONSTRATION_COLOR,
+                        callback.TICK_COLOR, title=title, save_path=plot_path)
+    cprint(f"Saved {name.replace('_', ' ')} plot to {plot_path}", "cyan")
 
 
 # ===========================================================================
@@ -771,35 +928,37 @@ def add_legend_to_video(video_frames, colormap='cool'):
     return np.concatenate([video_frames, colorbar_video], axis=1)
 
 
-def save_grasp_deviation_plot(rollouts, training_start_yaws, policy_color, demonstration_color, tick_color, title, save_path):
-    """One panel per metric over the actor's start yaw: the policy's rollouts (x = failed), the
-    demonstrations' slip as the reference, the training episodes' start yaws as ticks."""
-    panels = [('grasp_position_error_mm', 'grasp position error [mm]'),
-              ('grasp_rotation_error_deg', 'grasp rotation error [deg]'),
-              ('slip_translation_mm', 'in-hand slip, translation [mm]'),
-              ('slip_rotation_deg', 'in-hand slip, rotation [deg]')]
-    fig, axes = plt.subplots(2, 2, figsize=(11, 7), sharex=True)
-    for ax, (metric, label) in zip(axes.flat, panels):
-        for is_success, marker in ((True, 'o'), (False, 'x')):
-            subset = [rollout for rollout in rollouts if rollout['is_success'] == is_success]
-            ax.scatter([rollout['start_yaw'] for rollout in subset], [rollout[metric] for rollout in subset],
-                       marker=marker, s=40, color=policy_color, linewidths=1.5,
-                       label=f"policy, {'success' if is_success else 'failure'}")
-        if metric.startswith('slip'):
-            ax.scatter([rollout['start_yaw'] for rollout in rollouts], [rollout[f'demonstration_{metric}'] for rollout in rollouts],
-                       marker='s', s=40, facecolors='none', edgecolors=demonstration_color, linewidths=1.5,
-                       label='demonstration (reference)')
-        ax.plot(training_start_yaws, np.zeros_like(training_start_yaws), '|', markersize=10, color=tick_color,
-                transform=ax.get_xaxis_transform(), label='training start yaws')
-        ax.set_ylabel(label)
-        ax.set_ylim(bottom=0)
-        ax.grid(True, color='#e6e6e3', linewidth=0.8)
-        ax.set_axisbelow(True)
-        for side in ('top', 'right'):
-            ax.spines[side].set_visible(False)
-    for ax in axes[1]:
+def save_deviation_plot(rollouts, panel_rows, training_start_yaws, policy_color, demonstration_color, tick_color, title, save_path):
+    """One panel per metric over the actor's start yaw, a row of panels per row of panel_rows:
+    the policy's rollouts that hold the metric (x = failed), the demonstration's value as the
+    reference where the rollouts hold one, the training episodes' start yaws as ticks."""
+    num_columns = max(len(panels) for panels in panel_rows)
+    fig, axes = plt.subplots(len(panel_rows), num_columns, figsize=(5.5 * num_columns, 3.5 * len(panel_rows)), sharex=True, squeeze=False)
+    for row, panels in zip(axes, panel_rows):
+        for ax in row[len(panels):]:
+            ax.set_visible(False)
+        for ax, (metric, label) in zip(row, panels):
+            for is_success, marker in ((True, 'o'), (False, 'x')):
+                subset = [rollout for rollout in rollouts if metric in rollout and rollout['is_success'] == is_success]
+                ax.scatter([rollout['start_yaw'] for rollout in subset], [rollout[metric] for rollout in subset],
+                           marker=marker, s=40, color=policy_color, linewidths=1.5,
+                           label=f"policy, {'success' if is_success else 'failure'}")
+            reference = [rollout for rollout in rollouts if f'demonstration_{metric}' in rollout]
+            if reference:
+                ax.scatter([rollout['start_yaw'] for rollout in reference], [rollout[f'demonstration_{metric}'] for rollout in reference],
+                           marker='s', s=40, facecolors='none', edgecolors=demonstration_color, linewidths=1.5,
+                           label='demonstration (reference)')
+            ax.plot(training_start_yaws, np.zeros_like(training_start_yaws), '|', markersize=10, color=tick_color,
+                    transform=ax.get_xaxis_transform(), label='training start yaws')
+            ax.set_ylabel(label)
+            ax.set_ylim(bottom=0)
+            ax.grid(True, color='#e6e6e3', linewidth=0.8)
+            ax.set_axisbelow(True)
+            for side in ('top', 'right'):
+                ax.spines[side].set_visible(False)
+    for ax in axes[-1]:
         ax.set_xlabel('start yaw [deg]')
-    handles, labels = axes[1, 0].get_legend_handles_labels()
+    handles, labels = axes[-1, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='lower center', ncol=len(labels), frameon=False)
     fig.suptitle(title)
     fig.tight_layout(rect=(0, 0.05, 1, 1))

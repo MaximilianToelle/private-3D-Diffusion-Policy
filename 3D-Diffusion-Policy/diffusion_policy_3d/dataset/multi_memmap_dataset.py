@@ -212,8 +212,9 @@ class MultiMemmapDataset(BaseDataset):
             global_train_mask = np.repeat(~is_held_out_dataset, self.episode_counts)
         elif held_out_start_yaw_deg is not None:
             assert num_train_episodes is None, "held_out_start_yaw_deg replaces num_train_episodes, set it to null"
+            assert len(self.actor_keys) == 1, f"held_out_start_yaw_deg needs exactly one moving actor, the dataset has {self.actor_keys}"
             low, high = held_out_start_yaw_deg
-            start_yaws = self.episode_start_yaws_deg()
+            start_yaws = self.episode_start_yaws_deg(self.actor_keys[0])
             global_train_mask = (start_yaws < low) | (start_yaws > high)
         else:
             global_train_mask = train_episode_mask(
@@ -259,14 +260,13 @@ class MultiMemmapDataset(BaseDataset):
               f"{self.total_episodes} total episodes, "
               f"{sum(self._sampler_lengths)} training samples")
 
-    def episode_start_yaws_deg(self) -> np.ndarray:
-        """Yaw of the single moving actor at the first step of every episode, in global episode
-        order. The actor stands upright at the start, so its rotation is one about z."""
-        assert len(self.actor_keys) == 1, f"a start yaw needs exactly one moving actor, the dataset has {self.actor_keys}"
+    def episode_start_yaws_deg(self, actor_key: str) -> np.ndarray:
+        """Yaw of the actor (actor_pose_<name>) at the first step of every episode, in global
+        episode order. The actor stands upright at the start, so its rotation is one about z."""
         start_yaws = []
         for buf in self.replay_buffers:
             episode_starts = np.concatenate([[0], buf.episode_ends[:-1]]).astype(int)
-            quaternions = np.array(buf[self.actor_keys[0]][episode_starts, 3:7])  # w, x, y, z
+            quaternions = np.array(buf[actor_key][episode_starts, 3:7])  # w, x, y, z
             start_yaws.append(np.degrees(2 * np.arctan2(quaternions[:, 3], quaternions[:, 0])))
         return (np.concatenate(start_yaws) + 180) % 360 - 180
 
