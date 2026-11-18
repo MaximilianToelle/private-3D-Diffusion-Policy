@@ -73,8 +73,6 @@ env_runner:
   eval_episodes: 20
   robot_uids: fr3_umi_wrist_zedxmini   # the only registered wrist-cam robot since the ZED X Mini migration
   n_envs: 1
-  sim_freq: 100
-  control_freq: 20
   sim_backend: cpu   # the recordings' physics (the gpu sim's camera group also fails with rt); policy and perception stay on `device`
   device: cuda:0
   tqdm_interval_sec: 5.0

@@ -75,8 +75,6 @@ class ManiSkillRunner(BaseRunner):
         n_action_steps: int = 8,
         n_envs: int = 1,
         max_steps: int = 1000,
-        sim_freq: int = 100,
-        control_freq: int = 20,    # match data collection -> 5 physics substeps!
         device: str = "cuda:0",
         depth_mode: str = None,     # None (gt) | fast_foundation_stereo, the depth the datasets were converted from
         shader: str = "default",    # sensor cameras: default (rasterizer) | rt | rt-med | rt-fast, as recorded
@@ -111,7 +109,6 @@ class ManiSkillRunner(BaseRunner):
             num_envs=n_envs,
             max_episode_steps=max_steps,
             sim_backend=sim_backend,
-            sim_config=dict(sim_freq=sim_freq, control_freq=control_freq),
             sensor_configs=dict(shader_pack=shader),
             human_render_camera_configs=dict(shader_pack=shader),
             depth_mode=depth_mode,
