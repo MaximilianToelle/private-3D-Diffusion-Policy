@@ -26,4 +26,4 @@ params:
 
 obs_wrapper_builder:
   _target_: diffusion_policy_3d.env_runner.maniskill_env_obs_wrapper_builder.fused_pcd
-  video_cam_name: wrist_cam
+  video_cam_name: static_cam_0

@@ -32,6 +32,7 @@ import cv2
 import imageio
 from scipy.spatial.transform import Rotation
 from termcolor import cprint
+import wandb
 
 from diffusion_policy_3d.gym_util.video_recording_wrapper import SimpleVideoRecordingWrapper
 from diffusion_policy_3d.gym_util.multistep_wrapper import MultiStepWrapper
@@ -133,7 +134,7 @@ class VideoSavingCallback(EvalCallback):
     The wrapper captures one frame per control step, so playing the video at the control frequency
     shows it in real time. The Gaussian-attention colorbar legend is appended below the frames
     whenever a `GaussianAttentionPlotCallback` runs, the only case the frames are colored by
-    attention.
+    attention. Episode 0 of every run also goes to wandb as `video`, at half the resolution.
 
     Args:
         colormap: matplotlib colormap name for the legend.
@@ -144,6 +145,8 @@ class VideoSavingCallback(EvalCallback):
 
     def at_episode_end(self, runner, *, episode_idx, is_success, prefix, env, expert_trajectory, info):
         video = _find_wrapper(env, SimpleVideoRecordingWrapper).get_video()  # (T, C, H, W)
+        if episode_idx == 0:
+            self.wandb_video = wandb.Video(video[:, :, ::2, ::2], fps=_find_env_attr(runner.env, "control_freq"), format="mp4")
 
         video_dir = os.path.join(runner.output_dir, "eval_videos")
         os.makedirs(video_dir, exist_ok=True)
@@ -155,6 +158,9 @@ class VideoSavingCallback(EvalCallback):
         out_path = os.path.join(video_dir, f"{prefix}_ep_{episode_idx}_{suffix}.mp4")
         imageio.mimsave(out_path, video_to_save, fps=_find_env_attr(runner.env, "control_freq"), macro_block_size=1)
         cprint(f"Saved evaluation video to {out_path}", "cyan")
+
+    def at_run_end(self, runner, *, prefix, log_data):
+        log_data['video'] = self.wandb_video
 
 
 # ---------------------------------------------------------------------------
