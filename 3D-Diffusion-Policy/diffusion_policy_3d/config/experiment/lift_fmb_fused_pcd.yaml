@@ -15,7 +15,7 @@ name: lift_fmb_fused_pcd
 data:
   # one converted dataset per piece and scene representation
   dataset_path: ${repo_root:}/datasets/${scene_representation.name}/${task.piece}
-  num_train_episodes: 40
+  num_train_episodes: 80
   # [low, high]: validate on the episodes whose start yaw lies inside, train on all others
   # (unseen rotations); needs num_train_episodes: null
   held_out_start_yaw_deg: null
