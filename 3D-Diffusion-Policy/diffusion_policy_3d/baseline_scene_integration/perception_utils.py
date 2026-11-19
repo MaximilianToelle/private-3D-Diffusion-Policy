@@ -125,13 +125,14 @@ def voxel_downsample_nearest_to_center(points, voxel_size, labels=None):
     return grouped[first_of_voxel]
 
 
-def fused_pcd(depths_m, normals_gl, segmentations, intrinsics, cam2worlds_cv, is_body, scene_representation, generator=None):
+def fused_pcd(depths_m, normals_gl, segmentations, intrinsics, cam2worlds_cv, is_body, scene_representation):
     """One frame of the fused_pcd_dense / fused_pcd_sparse representation
     (config/scene_representation/fused_pcd.yaml), for the converter and the observation wrapper:
-    the cameras fused (fuse_cameras_with_normals), the points selected, one point per voxel and a
-    uniform random subset of at most num_pool_points. Without a crop_box the selected points are
-    those whose segmentation label is_body (bool lookup by label) marks, one per voxel and
-    segmented body. Returns points (N, 3) and unit normals (N, 3)."""
+    the cameras fused (fuse_cameras_with_normals), the points selected and one point kept per
+    voxel. Without a crop_box the selected points are those whose segmentation label is_body (bool
+    lookup by label) marks, one per voxel and segmented body. The converter stores a
+    farthest_point_pool of the result, the wrapper samples it directly. Returns points (N, 3) and
+    unit normals (N, 3)."""
     points, normals, labels = fuse_cameras_with_normals(depths_m, normals_gl, segmentations, intrinsics, cam2worlds_cv)
     crop_box = scene_representation["crop_box"]
     if crop_box is None:
@@ -143,7 +144,6 @@ def fused_pcd(depths_m, normals_gl, segmentations, intrinsics, cam2worlds_cv, is
         voxel_labels = None  # no segmentation in the crop-box variant
     points, normals = points[selected], normals[selected]
     kept = voxel_downsample_nearest_to_center(points, scene_representation["voxel_size"], voxel_labels)
-    kept = kept[torch.randperm(len(kept), generator=generator, device=kept.device)[:scene_representation["num_pool_points"]]]
     return points[kept], normals[kept]
 
 
@@ -205,14 +205,15 @@ def regional_farthest_point_downsample(pools, num_region_points, region_budgets,
 
 
 def farthest_point_pool(points, num_pool_points):
-    """The stored superset of one accumulated memory: (N, 3) -> (min(N, num_pool_points), 3) by
-    deterministic farthest-point sampling, or the memory itself while it is smaller.
+    """The stored superset of one frame's cloud: (N, C) -> (min(N, num_pool_points), C) by
+    deterministic farthest-point sampling on the positions, or the cloud itself while it is smaller.
 
-    A frame's memory can hold 100k points and farthest-point sampling costs time proportional
-    to that count, so the converter stores this pool per frame instead of the full memory, and
-    the second stage samples num_points out of it: PointCloudFPS in training, the observation
-    wrapper at rollout. The wrapper runs both stages, so rollout observations follow the
-    dataset's distribution."""
+    A frame's cloud can hold 100k points and farthest-point sampling costs time proportional
+    to that count, so the converter stores this pool per frame instead of the full cloud, and
+    the second stage samples num_points out of it: PointCloudFPS / RegionalFPS in training, the
+    observation wrapper at rollout. Both stages start at the cloud's first point, so sampling the
+    pool without a random start returns the pool's first picks, the same points as sampling the
+    whole cloud: a wrapper may skip the pool."""
     if points.shape[0] <= num_pool_points:
         return points
     return farthest_point_downsample(points.unsqueeze(0), num_pool_points, random_start_point=False).squeeze(0)

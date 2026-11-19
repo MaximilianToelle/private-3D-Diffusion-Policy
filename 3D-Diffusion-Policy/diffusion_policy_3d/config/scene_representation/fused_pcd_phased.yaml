@@ -1,7 +1,7 @@
 # Phased region-of-interest selection for the FMB insertion (baseline_scene_integration/roi_selection.py):
-# the gripper fingers, the piece and the region around its hole, each with its own stored pool of
-# num_pool_points // 3. The mode picks the regions each phase of the task samples; the regions,
-# the phase rule and the hole margin live in roi_selection.py.
+# the gripper fingers, the piece and the region around its hole, each with its own stored
+# farthest-point pool of num_pool_points // 3. The mode picks the regions each phase of the task
+# samples; the regions, the phase rule and the hole margin live in roi_selection.py.
 defaults:
   - fused_pcd
   - _self_

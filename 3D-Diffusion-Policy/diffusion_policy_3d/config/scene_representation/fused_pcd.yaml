@@ -21,7 +21,9 @@ obs_mode: state_dict
 params:
   voxel_size: 0.002           # [m], about one static-camera pixel at the piece (2.1 mm)
   num_points: 1024            # what the policy consumes: farthest-point sampled per training batch / live obs
-  num_pool_points: 8192       # stored per frame: a uniform random subset of the voxel-downsampled cloud
+  # stored per frame: the first picks of farthest-point sampling over the voxel-downsampled cloud
+  # (fixed start), so sampling num_points from it without a random start equals sampling the whole cloud
+  num_pool_points: 8192
 
 obs_wrapper_builder:
   _target_: diffusion_policy_3d.env_runner.maniskill_env_obs_wrapper_builder.fused_pcd

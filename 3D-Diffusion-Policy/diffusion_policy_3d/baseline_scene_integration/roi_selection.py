@@ -96,24 +96,17 @@ def region_budgets(mode, num_points) -> torch.Tensor:
 
 
 def phased_roi_pcd(depths_m, normals_gl, segmentations, intrinsics, cam2worlds_cv, region_of_segmentation_id,
-                   hole_center_xy, hole_radius, scene_representation, generator=None):
-    """One frame of the fused_pcd_phased representation, the pool every mode samples from, for the
+                   hole_center_xy, hole_radius, scene_representation):
+    """One frame of the fused_pcd_phased representation, the cloud every mode samples from, for the
     converter and the observation wrapper: the cameras fused as for fused_pcd, every point
-    assigned its region, per region one point per voxel and segmented body and a uniform random
-    subset of at most num_pool_points // len(REGIONS). Returns points (R, P, 3) and unit normals
-    (R, P, 3), padded, and num_region_points (R,)."""
+    assigned its region, the points of no region dropped and one point kept per voxel and
+    segmented body (a body belongs to one region at most, so this is per region as well). The
+    converter stores a farthest_point_pool of num_pool_points // len(REGIONS) per region, the
+    wrapper samples the regions directly. Returns points (N, 3), unit normals (N, 3) and the
+    region of every point (N,)."""
     points, normals, segmentation_ids = fuse_cameras_with_normals(depths_m, normals_gl, segmentations, intrinsics, cam2worlds_cv)
     regions = region_indices(points, segmentation_ids, region_of_segmentation_id, hole_center_xy, hole_radius)
-    pool_size = scene_representation["num_pool_points"] // len(REGIONS)
-    pooled_points = points.new_zeros(len(REGIONS), pool_size, 3)
-    pooled_normals = points.new_zeros(len(REGIONS), pool_size, 3)
-    num_region_points = torch.zeros(len(REGIONS), dtype=torch.long, device=points.device)
-    for region in range(len(REGIONS)):
-        in_region = torch.nonzero(regions == region).squeeze(-1)
-        kept = in_region[voxel_downsample_nearest_to_center(points[in_region], scene_representation["voxel_size"],
-                                                            segmentation_ids[in_region])]
-        kept = kept[torch.randperm(len(kept), generator=generator, device=kept.device)[:pool_size]]
-        pooled_points[region, :len(kept)] = points[kept]
-        pooled_normals[region, :len(kept)] = normals[kept]
-        num_region_points[region] = len(kept)
-    return pooled_points, pooled_normals, num_region_points
+    selected = regions >= 0
+    points, normals, segmentation_ids, regions = points[selected], normals[selected], segmentation_ids[selected], regions[selected]
+    kept = voxel_downsample_nearest_to_center(points, scene_representation["voxel_size"], segmentation_ids)
+    return points[kept], normals[kept], regions[kept]

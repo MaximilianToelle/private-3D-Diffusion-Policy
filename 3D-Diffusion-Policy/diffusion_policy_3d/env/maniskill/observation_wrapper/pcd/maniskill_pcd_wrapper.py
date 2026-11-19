@@ -1,5 +1,6 @@
 import torch
 from gym import spaces
+from torch.nn.utils.rnn import pad_sequence
 
 from diffusion_policy_3d.baseline_scene_integration.perception_utils import (
     backproject_to_world,
@@ -11,6 +12,7 @@ from diffusion_policy_3d.baseline_scene_integration.perception_utils import (
 )
 from diffusion_policy_3d.baseline_scene_integration.roi_selection import (
     GRASP,
+    REGIONS,
     hole_radius,
     next_phase,
     phased_roi_pcd,
@@ -160,13 +162,11 @@ class FusedPCDManiSkillDP3Wrapper(ObservedStepRenderingWrapper):
     Fuses every camera of the current step with perception_utils.fused_pcd, the function
     convert_to_fused_pcd_memmap.py builds the dataset with, and reduces the result to
     ``num_points`` by farthest-point sampling without a random start, as the validation path
-    of the PointCloudFPS augmentation does. With point_normals every point carries its unit
-    surface normal as three more channels. The random subset fused_pcd draws comes from a
-    generator reseeded at every reset, so a start state yields the same subsets in every
-    evaluation as long as the rendered images are the same.
+    of the PointCloudFPS augmentation does. Without a random start, sampling the dataset's
+    farthest-point pool returns the same points as sampling the whole cloud, so the wrapper skips
+    the pool (perception_utils.farthest_point_pool). With point_normals every point carries its
+    unit surface normal as three more channels.
     """
-
-    POOL_SEED = 0
 
     def __init__(self, env, representation_space, agent_proprio_dim, video_cam_name, scene_representation,
                  segmented_body_names, point_normals, device):
@@ -178,7 +178,6 @@ class FusedPCDManiSkillDP3Wrapper(ObservedStepRenderingWrapper):
 
         super().__init__(env, representation_space, agent_proprio_dim, video_cam_name, device)
 
-        self.generator = torch.Generator(device=self.compute_device)
         # Without a crop box, fused_pcd keeps the points whose segmentation id this marks.
         segmentation_id_map = self.env.unwrapped.segmentation_id_map
         self.is_body = torch.zeros(max(segmentation_id_map) + 1, dtype=torch.bool, device=self.compute_device)
@@ -192,11 +191,8 @@ class FusedPCDManiSkillDP3Wrapper(ObservedStepRenderingWrapper):
                 shape=(self.num_points, 6 if self.point_normals else 3), dtype='float32'),
         }
 
-    def _reset_perception_state(self):
-        self.generator.manual_seed(self.POOL_SEED)
-
     def _get_perception_obs_dict(self, obs, step):
-        points, normals = fused_pcd(*self._camera_frames(obs), self.is_body, self.scene_representation, self.generator)
+        points, normals = fused_pcd(*self._camera_frames(obs), self.is_body, self.scene_representation)
         cloud = torch.cat([points, normals], dim=-1) if self.point_normals else points
         return {
             'point_cloud': farthest_point_downsample(
@@ -208,16 +204,15 @@ class PhasedROIManiSkillDP3Wrapper(ObservedStepRenderingWrapper):
     """
     Phased region-of-interest wrapper (fused_pcd_phased, baseline_scene_integration/roi_selection.py).
 
-    Builds the per-region pools of every camera of the current step with
+    Builds the per-region clouds of every camera of the current step with
     roi_selection.phased_roi_pcd, the function convert_to_fused_pcd_memmap.py --variant phased
     builds the dataset with, from the env's ground-truth segmentation and hole pose, and samples
     them as the validation path of the RegionalFPS augmentation does: the regions the
     roi_selection mode samples in the current phase, num_points split equally, without a random
-    start. The phase follows the executed gripper commands as in the converter and starts at
-    GRASP every reset; the generator of the pools' random subsets is reseeded every reset.
+    start, which returns the same points as sampling the dataset's per-region farthest-point
+    pools. The phase follows the executed gripper commands as in the converter and starts at
+    GRASP every reset.
     """
-
-    POOL_SEED = 0
 
     def __init__(self, env, representation_space, agent_proprio_dim, video_cam_name, scene_representation,
                  roi_selection, point_normals, device):
@@ -230,7 +225,6 @@ class PhasedROIManiSkillDP3Wrapper(ObservedStepRenderingWrapper):
         super().__init__(env, representation_space, agent_proprio_dim, video_cam_name, device)
 
         base_env = self.env.unwrapped
-        self.generator = torch.Generator(device=self.compute_device)
         self.region_of_segmentation_id = region_lookup(
             {seg_id: body.name for seg_id, body in base_env.segmentation_id_map.items()}).to(self.compute_device)
         self.hole_radius = hole_radius(base_env.piece)
@@ -245,7 +239,6 @@ class PhasedROIManiSkillDP3Wrapper(ObservedStepRenderingWrapper):
         }
 
     def _reset_perception_state(self):
-        self.generator.manual_seed(self.POOL_SEED)
         self.phase = GRASP
 
     def step(self, action, observe=True):
@@ -255,12 +248,14 @@ class PhasedROIManiSkillDP3Wrapper(ObservedStepRenderingWrapper):
 
     def _get_perception_obs_dict(self, obs, step):
         hole_center_xy = self.env.unwrapped.hole_pose.p[0, :2].to(self.compute_device, torch.float32)
-        points, normals, num_region_points = phased_roi_pcd(
+        points, normals, regions = phased_roi_pcd(
             *self._camera_frames(obs), self.region_of_segmentation_id, hole_center_xy, self.hole_radius,
-            self.scene_representation, self.generator)
-        pools = torch.cat([points, normals], dim=-1) if self.point_normals else points
+            self.scene_representation)
+        cloud = torch.cat([points, normals], dim=-1) if self.point_normals else points
+        region_clouds = [cloud[regions == region] for region in range(len(REGIONS))]
+        num_region_points = torch.tensor([len(region_cloud) for region_cloud in region_clouds], device=cloud.device)
         return {
             'point_cloud': regional_farthest_point_downsample(
-                pools.unsqueeze(0), num_region_points.unsqueeze(0), self.region_budgets[self.phase].unsqueeze(0),
-                random_start_point=False).squeeze(0),
+                pad_sequence(region_clouds, batch_first=True).unsqueeze(0), num_region_points.unsqueeze(0),
+                self.region_budgets[self.phase].unsqueeze(0), random_start_point=False).squeeze(0),
         }
