@@ -1,0 +1,32 @@
+# Phased region-of-interest selection for the FMB insertion (baseline_scene_integration/roi_selection.py):
+# the gripper fingers, the piece and the region around its hole, each with its own stored pool of
+# num_pool_points // 3. The mode picks the regions each phase of the task samples; the regions,
+# the phase rule and the hole margin live in roi_selection.py.
+defaults:
+  - fused_pcd
+  - _self_
+
+name: fused_pcd_phased
+
+# phased: fingers + piece while grasping, piece + hole while inserting, fingers + piece after the
+# release; targeted: all three regions throughout. Acts only where num_points are sampled, so
+# both modes train on the same dataset.
+roi_selection: phased
+
+dataset:
+  region_pools: true
+
+obs_wrapper_builder:
+  _target_: diffusion_policy_3d.env_runner.maniskill_env_obs_wrapper_builder.phased_roi_pcd
+  roi_selection: ${scene_representation.roi_selection}
+
+train_data_augmentations:
+  - _target_: diffusion_policy_3d.dataset.data_augmentations.RegionalFPS
+    roi_selection: ${scene_representation.roi_selection}
+    num_points: ${scene_representation.params.num_points}
+    random_start_point: true   # a different subset of the same pool in every epoch
+val_data_augmentations:
+  - _target_: diffusion_policy_3d.dataset.data_augmentations.RegionalFPS
+    roi_selection: ${scene_representation.roi_selection}
+    num_points: ${scene_representation.params.num_points}
+    random_start_point: false  # one fixed subset, so the val loss stays comparable

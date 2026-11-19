@@ -1,10 +1,12 @@
-# Shared part of the fused point-cloud scene representations, fused_pcd_dense and fused_pcd_sparse.
+# Shared part of the fused point-cloud scene representations, fused_pcd_dense, fused_pcd_sparse
+# and fused_pcd_phased.
 # NOTE: an inheritance parent, never selected directly as `scene_representation=`.
 #
 # Every frame, all cameras are backprojected into the robot base frame (= world frame, the robot
 # root sits at the origin) and fused into one cloud with the renderer's surface normal per point.
-# The variant selects points (crop_box), the voxel grid keeps one measured point per voxel,
-# the one nearest to the voxel center (no averaging, so positions and normals stay real).
+# The variant selects points, the voxel grid keeps one measured point per voxel, the one nearest
+# to the voxel center (no averaging, so positions and normals stay real); a variant selecting by
+# segmentation keeps one per voxel and segmented body.
 defaults:
   - point_cloud
   - _self_
@@ -20,11 +22,6 @@ params:
   voxel_size: 0.002           # [m], about one static-camera pixel at the piece (2.1 mm)
   num_points: 1024            # what the policy consumes: farthest-point sampled per training batch / live obs
   num_pool_points: 8192       # stored per frame: a uniform random subset of the voxel-downsampled cloud
-  # null: only the points the ground-truth segmentation assigns to one of segmented_robot_links or
-  # to a moving actor (dense on the piece); [[x, y, z] min, [x, y, z] max]: every point inside
-  # this box (sparse on the piece)
-  crop_box: null
-  segmented_robot_links: []
 
 obs_wrapper_builder:
   _target_: diffusion_policy_3d.env_runner.maniskill_env_obs_wrapper_builder.fused_pcd

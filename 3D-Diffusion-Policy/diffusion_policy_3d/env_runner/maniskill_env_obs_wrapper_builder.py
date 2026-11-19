@@ -20,7 +20,8 @@ from omegaconf import OmegaConf
 from gsplat_envs.mani_skill.sensors import depth_obs_key
 from diffusion_policy_3d.dataset.multi_memmap_dataset import dataset_attrs, discover_dataset_paths
 from diffusion_policy_3d.env.maniskill.observation_wrapper.gaussian_splatting.maniskill_wrist_cam_gs_wrapper import WristCamGSManiskillDP3Wrapper
-from diffusion_policy_3d.env.maniskill.observation_wrapper.pcd.maniskill_pcd_wrapper import FusedPCDManiSkillDP3Wrapper, SingleStepPCDManiSkillDP3Wrapper
+from diffusion_policy_3d.baseline_scene_integration.roi_selection import HOLE_MARGIN
+from diffusion_policy_3d.env.maniskill.observation_wrapper.pcd.maniskill_pcd_wrapper import FusedPCDManiSkillDP3Wrapper, PhasedROIManiSkillDP3Wrapper, SingleStepPCDManiSkillDP3Wrapper
 from diffusion_policy_3d.env.maniskill.observation_wrapper.pcd.maniskill_pcd_spatial_memory_wrapper import SpatialMemoryPCDManiSkillDP3Wrapper
 
 
@@ -169,6 +170,51 @@ def fused_pcd(
         video_cam_name=video_cam_name,
         scene_representation=composed,
         segmented_body_names=composed["segmented_robot_links"] + list(moving_actors.pop()),
+        point_normals=point_normals,
+        device=device,
+    )
+
+
+def phased_roi_pcd(
+    *,
+    # injected by ManiSkillRunner
+    base_env,
+    device,
+    # defined in config, injected by hydra
+    representation_space,
+    agent_proprio_dim,
+    video_cam_name,
+    scene_representation,
+    roi_selection,
+    point_normals,
+    dataset_path,
+):
+    """
+    Phased region-of-interest perception head (config/scene_representation/fused_pcd_phased.yaml):
+    the per-region pools of convert_to_fused_pcd_memmap.py --variant phased (stamp asserted, and
+    the hole margin the datasets were converted with against roi_selection.HOLE_MARGIN), sampled
+    by the roi_selection mode. video_cam_name only picks the camera of the evaluation videos.
+    """
+    assert representation_space == "abs_joint_pos", (
+        f"the phased point cloud supports abs_joint_pos only, got '{representation_space}'")
+    assert base_env.unwrapped.obs_mode == "state_dict", (
+        "the phased point-cloud wrapper renders the cameras itself, so ManiSkill must not render in "
+        f"its step (obs_mode state_dict), got '{base_env.unwrapped.obs_mode}'")
+    assert base_env.unwrapped.depth_mode is None, (
+        "the phased point-cloud wrapper reads the renderer's ground-truth depth only, not a depth_mode's")
+    composed = scene_representation_of_datasets(base_env, scene_representation, dataset_path)
+    for path in discover_dataset_paths(dataset_path):
+        assert dataset_attrs(path)["hole_margin"] == HOLE_MARGIN, (
+            f"{path} was converted with the hole margin {dataset_attrs(path)['hole_margin']}, "
+            f"roi_selection.HOLE_MARGIN is {HOLE_MARGIN} -- reconvert the dataset or revert the constant.")
+
+    return PhasedROIManiSkillDP3Wrapper(
+        base_env,
+        representation_space,
+        agent_proprio_dim=agent_proprio_dim,
+        video_cam_name=video_cam_name,
+        scene_representation=composed,
+        roi_selection=roi_selection,
         point_normals=point_normals,
         device=device,
     )

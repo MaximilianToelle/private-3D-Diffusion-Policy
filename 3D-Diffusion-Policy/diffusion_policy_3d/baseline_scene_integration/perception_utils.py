@@ -105,14 +105,19 @@ def fuse_cameras_with_normals(depths_m, normals_gl, segmentations, intrinsics, c
     return torch.cat(points), torch.cat(normals), torch.cat(labels)
 
 
-def voxel_downsample_nearest_to_center(points, voxel_size):
+def voxel_downsample_nearest_to_center(points, voxel_size, labels=None):
     """Indices of one point per occupied voxel: the one nearest to the voxel center. The kept
     points are measured ones, not averages, so whatever is indexed with them (normals, labels)
-    stays exact."""
+    stays exact. With labels (P,), the segmentation ids, one point per voxel and segmented body:
+    two bodies whose surfaces share a voxel (a piece in its hole, a finger pad on the piece) keep
+    a point each."""
     voxel_coordinates = points / voxel_size
     voxel_corners = torch.floor(voxel_coordinates)
     distance_to_center = ((voxel_coordinates - voxel_corners - 0.5) ** 2).sum(dim=-1)
-    _, voxel_index = torch.unique(voxel_corners.long(), dim=0, return_inverse=True)
+    voxel_keys = voxel_corners.long()
+    if labels is not None:
+        voxel_keys = torch.cat([voxel_keys, labels.long().unsqueeze(-1)], dim=-1)
+    _, voxel_index = torch.unique(voxel_keys, dim=0, return_inverse=True)
     nearest_first = torch.argsort(distance_to_center)
     grouped = nearest_first[torch.argsort(voxel_index[nearest_first], stable=True)]
     first_of_voxel = torch.ones_like(grouped, dtype=torch.bool)
@@ -125,17 +130,19 @@ def fused_pcd(depths_m, normals_gl, segmentations, intrinsics, cam2worlds_cv, is
     (config/scene_representation/fused_pcd.yaml), for the converter and the observation wrapper:
     the cameras fused (fuse_cameras_with_normals), the points selected, one point per voxel and a
     uniform random subset of at most num_pool_points. Without a crop_box the selected points are
-    those whose segmentation label is_body (bool lookup by label) marks. Returns points (N, 3)
-    and unit normals (N, 3)."""
+    those whose segmentation label is_body (bool lookup by label) marks, one per voxel and
+    segmented body. Returns points (N, 3) and unit normals (N, 3)."""
     points, normals, labels = fuse_cameras_with_normals(depths_m, normals_gl, segmentations, intrinsics, cam2worlds_cv)
     crop_box = scene_representation["crop_box"]
     if crop_box is None:
         selected = is_body[labels]
+        voxel_labels = labels[selected]
     else:
         box = points.new_tensor(crop_box)
         selected = ((points >= box[0]) & (points <= box[1])).all(dim=-1)
+        voxel_labels = None  # no segmentation in the crop-box variant
     points, normals = points[selected], normals[selected]
-    kept = voxel_downsample_nearest_to_center(points, scene_representation["voxel_size"])
+    kept = voxel_downsample_nearest_to_center(points, scene_representation["voxel_size"], voxel_labels)
     kept = kept[torch.randperm(len(kept), generator=generator, device=kept.device)[:scene_representation["num_pool_points"]]]
     return points[kept], normals[kept]
 
@@ -167,6 +174,34 @@ def farthest_point_downsample(points, num_points, lengths=None, random_start_poi
     _, indices = sample_farthest_points(points[..., :3], lengths=lengths, K=num_points,
                                         random_start_point=random_start_point)
     return masked_gather(points, indices)
+
+
+def regional_farthest_point_downsample(pools, num_region_points, region_budgets, random_start_point=True):
+    """farthest_point_downsample of every region of a cloud on its own, the regions concatenated.
+    pools (B, R, P, C) holds per cloud the stored pool of each of R regions, padded to P rows,
+    num_region_points (B, R) their real rows, region_budgets (B, R) the points each region
+    contributes (0 for a region left out), summing to the same total for every cloud. A region
+    with fewer points than its budget repeats them: DP3's encoder takes the max over the points,
+    so a repeated point changes nothing. Returns (B, total, C)."""
+    B, R, P, C = pools.shape
+    totals = region_budgets.sum(dim=1)
+    assert (totals == totals[0]).all(), f"the region budgets sum to different totals {totals.unique().tolist()}"
+    assert ((num_region_points > 0) | (region_budgets == 0)).all(), "a region with a budget has no points"
+    samples, in_budget = [], []
+    for region in range(R):
+        budgets = region_budgets[:, region]
+        if budgets.max() == 0:
+            continue
+        # a region left out may be empty, where a random start point is undefined
+        lengths = num_region_points[:, region].clamp(min=1)
+        _, indices = sample_farthest_points(pools[:, region, :, :3], lengths=lengths, K=budgets,
+                                            random_start_point=random_start_point)
+        slots = torch.arange(indices.shape[1], device=indices.device).expand_as(indices)
+        num_sampled = torch.minimum(budgets, lengths).clamp(min=1).unsqueeze(1)
+        indices = torch.where(slots < num_sampled, indices, indices.gather(1, slots % num_sampled))
+        samples.append(masked_gather(pools[:, region], indices))
+        in_budget.append(slots < budgets.unsqueeze(1))
+    return torch.cat(samples, dim=1)[torch.cat(in_budget, dim=1)].view(B, int(totals[0]), C)
 
 
 def farthest_point_pool(points, num_pool_points):

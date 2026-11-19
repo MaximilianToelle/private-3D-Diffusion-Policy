@@ -4,7 +4,9 @@ from gsworld.constants import fr3_gs_semantics
 
 from diffusion_policy_3d.baseline_scene_integration.perception_utils import (
     farthest_point_downsample,
+    regional_farthest_point_downsample,
 )
+from diffusion_policy_3d.baseline_scene_integration.roi_selection import region_budgets
 
 
 class GaussianCompose:
@@ -100,6 +102,33 @@ class PointCloudFPS:
             random_start_point=self.random_start_point,
         )
         obs['point_cloud'] = sampled.view(B, T, self.num_points, channels)
+        return batch
+
+
+class RegionalFPS:
+    """
+    Farthest Point Sampling of every region's pool on its own, for fused_pcd_phased
+    (baseline_scene_integration/roi_selection.py): the regions the roi_selection mode samples in
+    each observation's phase, num_points split equally over them, a short region repeating its
+    points. Batching and random_start_point as in PointCloudFPS.
+    """
+    def __init__(self, roi_selection, num_points=1024, random_start_point=True):
+        self.region_budgets = region_budgets(roi_selection, num_points)
+        self.random_start_point = random_start_point
+
+    def __call__(self, batch):
+        obs = batch['obs']
+        pools = obs['point_cloud']                                      # (B, T, R, P, channels)
+        num_region_points = obs.pop('num_region_points')                # (B, T, R)
+        phase = obs.pop('phase')                                        # (B, T)
+        B, T, R, P, channels = pools.shape
+        sampled = regional_farthest_point_downsample(
+            pools.reshape(B * T, R, P, channels),
+            num_region_points.reshape(B * T, R),
+            self.region_budgets.to(pools.device)[phase.reshape(B * T)],
+            random_start_point=self.random_start_point,
+        )
+        obs['point_cloud'] = sampled.view(B, T, -1, channels)
         return batch
 
 

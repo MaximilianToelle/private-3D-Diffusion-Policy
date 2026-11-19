@@ -15,6 +15,10 @@ milliseconds on the CPU, which the dataloader workers cannot hide, whereas one c
 whole batch costs about as much on the GPU. Training draws a fresh subset every epoch,
 validation a fixed one, which the augmentation controls through random_start_point.
 
+With region_pools (fused_pcd_phased) the pool is stored per region, (T, R, P, 3) with
+num_region_points (T, R) instead of num_valid_points, plus the phase of every step; the
+RegionalFPS augmentation samples it.
+
 Plain DP3 on abs_joint_pos only -- the pcd obs-wrapper builders reject
 relative_ee_pose (RelativeEEControlWrapper only transforms gs_* keys).
 """
@@ -42,10 +46,15 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
             held_out_start_yaw_deg=None,
             held_out_dataset_path=None,
             point_normals=False,
+            region_pools=False,
             ):
         """point_normals: every point also carries its unit surface normal as three more
-        channels, from the point_normal array of the fused_pcd datasets."""
+        channels, from the point_normal array of the fused_pcd datasets. region_pools: the
+        datasets store a pool per region and the phase of every step (fused_pcd_phased)."""
         self.point_normals = point_normals
+        self.region_pools = region_pools
+        # the real rows of each stored pool
+        self.pool_size_key = 'num_region_points' if region_pools else 'num_valid_points'
         # Opens one memmap-backed replay buffer and one sampler per dataset (point_cloud is
         # (T, N, 3) f32, read through the OS page cache), splits train/val globally over all
         # of them and provides the global->local index mapping (dataset/multi_memmap_dataset.py).
@@ -79,8 +88,9 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
                 f"{attrs['scene_representation']}")
 
     def _sampler_keys(self):
-        return (['point_cloud', 'num_valid_points', 'joint_pos_proprio',
-                 'joint_pos_action'] + (['point_normal'] if self.point_normals else []) + self.actor_keys)
+        return (['point_cloud', self.pool_size_key, 'joint_pos_proprio', 'joint_pos_action']
+                + (['point_normal'] if self.point_normals else []) + (['phase'] if self.region_pools else [])
+                + self.actor_keys)
 
     def get_episode_init_data(self, global_episode_idx):
         """Init state + expert trajectory of one episode, used by the env runner to
@@ -165,12 +175,12 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
         squared_coordinate_sum = torch.zeros(3, dtype=torch.float64)
         num_points = 0
         for replay_buffer, frame_indices in zip(self.replay_buffers, per_buffer_frame_indices):
-            num_valid_points = replay_buffer['num_valid_points']
+            pool_sizes = replay_buffer[self.pool_size_key]
             for start in range(0, len(frame_indices), 512):
                 block = frame_indices[start:start + 512]
                 clouds = replay_buffer['point_cloud'][block]
-                is_valid = (np.arange(clouds.shape[1])[None, :]
-                            < num_valid_points[block][:, None])
+                # (block, N) or, with region pools, (block, R, P)
+                is_valid = np.arange(clouds.shape[-2]) < pool_sizes[block][..., None]
                 points = torch.from_numpy(clouds[is_valid])
                 pos_min = torch.minimum(pos_min, points.min(dim=0)[0])
                 pos_max = torch.maximum(pos_max, points.max(dim=0)[0])
@@ -198,8 +208,8 @@ class WristCamPCDMemmapManiskillDataset(MultiMemmapDataset):
                 'point_cloud': torch.from_numpy(np.concatenate(
                     [sample['point_cloud'][:self.n_obs_steps]]
                     + ([sample['point_normal'][:self.n_obs_steps]] if self.point_normals else []), axis=-1)),
-                'num_valid_points': torch.from_numpy(
-                    sample['num_valid_points'][:self.n_obs_steps].astype(np.int64)),
+                self.pool_size_key: torch.from_numpy(sample[self.pool_size_key][:self.n_obs_steps].astype(np.int64)),
+                **({'phase': torch.from_numpy(sample['phase'][:self.n_obs_steps].astype(np.int64))} if self.region_pools else {}),
                 'agent_proprio': torch.from_numpy(sample['joint_pos_proprio'][:self.n_obs_steps].astype(np.float32)),
             },
             'action': torch.from_numpy(sample['joint_pos_action'].astype(np.float32)),

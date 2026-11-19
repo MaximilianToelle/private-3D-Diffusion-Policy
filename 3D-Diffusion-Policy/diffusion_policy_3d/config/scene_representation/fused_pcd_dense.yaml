@@ -7,4 +7,5 @@ defaults:
 name: fused_pcd_dense
 
 params:
+  crop_box: null   # select by segmentation: the segmented_robot_links and every moving actor
   segmented_robot_links: [fr3_hand, fr3_leftfinger, fr3_rightfinger]
