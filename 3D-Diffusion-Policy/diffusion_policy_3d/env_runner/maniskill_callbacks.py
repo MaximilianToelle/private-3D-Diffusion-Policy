@@ -321,18 +321,31 @@ def _pose_change(pose_from, pose_to):
     return 1000 * np.linalg.norm(delta[:3, 3]), np.degrees(Rotation.from_matrix(delta[:3, :3]).magnitude())
 
 
+def _symmetric_pose_change(pose_from, pose_to, axis_pose, period_deg):
+    """_pose_change to pose_to from the nearest, by rotation angle, of pose_from rotated about the
+    z axis of axis_pose by a multiple of period_deg."""
+    turn = np.eye(4)
+    changes = []
+    for k in range(round(360 / period_deg)):
+        turn[:3, :3] = Rotation.from_euler('z', k * period_deg, degrees=True).as_matrix()
+        changes.append(_pose_change(axis_pose @ turn @ np.linalg.inv(axis_pose) @ pose_from, pose_to))
+    return min(changes, key=lambda change: change[1])
+
+
+def _symmetry_period_deg(env):
+    """The piece looks the same rotated about its frame's z axis by this angle (FMB envs)."""
+    return _find_env_attr(env, "SYMMETRY_PERIOD_DEG")[_find_env_attr(env, "piece").shape]
+
+
 def _yaw_deg(pose7):
     """Yaw of a pose rotated about z only, in [-180, 180)."""
     return (np.degrees(2 * np.arctan2(pose7[6], pose7[3])) + 180) % 360 - 180
 
 
-def _demonstration_grasp_and_release(gripper_action):
-    """Steps of the demonstration's grasp (first gripper action below 0) and release (first one
-    above 0 after the grasp, None if the gripper never opens again). The demonstrations ramp the
-    action between 1, open, and -1, closed."""
-    grasp = int(np.flatnonzero(gripper_action < 0)[0])
-    opening = np.flatnonzero(gripper_action[grasp:] > 0)
-    return grasp, grasp + int(opening[0]) if len(opening) > 0 else None
+def _demonstration_grasp(gripper_action):
+    """Step of the demonstration's grasp: its first gripper action below 0. The demonstrations ramp
+    the action between 1, open, and -1, closed."""
+    return int(np.flatnonzero(gripper_action < 0)[0])
 
 
 FINGERS_STOPPED = 1e-5  # [m] change of the finger opening in one step below which the fingers have stopped closing
@@ -356,35 +369,27 @@ def _tcp_pose(env, joint_positions):
 
 
 class GripperEvents:
-    """The policy's grasp (first executed gripper action below 0) and release (first one above
-    0 after the grasp), as in _demonstration_grasp_and_release. Callbacks read the env at the end
-    of an action chunk, so each event comes with the number of steps the chunk executed from it
-    on."""
+    """The policy's grasp: its first executed gripper action below 0, as in _demonstration_grasp.
+    Callbacks read the env at the end of an action chunk, so the grasp comes with the number of
+    steps the chunk executed from it on."""
 
     def reset(self):
-        self.closed = self.released = False
+        self.closed = False
 
     def chunk_predicted(self, action, env):
         self.chunk_gripper_actions = action[:, -1].cpu().numpy()
         self.steps_before_chunk = len(_find_wrapper(env, MultiStepWrapper).traj_agent_proprio) - 1
 
     def chunk_executed(self, env):
-        """The steps executed from the grasp and from the release on, each None unless it
-        happened in this chunk."""
+        """The steps executed from the grasp on, None unless the grasp happened in this chunk."""
+        if self.closed:
+            return None
         executed = len(_find_wrapper(env, MultiStepWrapper).traj_agent_proprio) - 1 - self.steps_before_chunk
-        actions = self.chunk_gripper_actions[:executed]
-        steps_since_grasp = steps_since_release = None
-        if not self.closed:
-            closing = np.flatnonzero(actions < 0)
-            if len(closing) == 0:
-                return None, None
-            self.closed, steps_since_grasp = True, executed - closing[0]
-            actions = actions[closing[0]:]
-        if not self.released:
-            opening = np.flatnonzero(actions > 0)
-            if len(opening) > 0:
-                self.released, steps_since_release = True, len(actions) - opening[0]
-        return steps_since_grasp, steps_since_release
+        closing = np.flatnonzero(self.chunk_gripper_actions[:executed] < 0)
+        if len(closing) == 0:
+            return None
+        self.closed = True
+        return executed - closing[0]
 
 
 class GraspDeviationCallback(EvalCallback):
@@ -393,9 +398,13 @@ class GraspDeviationCallback(EvalCallback):
     episode's demonstration is the oracle's grasp for exactly this start). The close command is
     the first gripper action below 0 (GripperEvents).
       grasp pose error     tcp pose of the policy vs the demonstration, each at the step its
-                           close command is issued, before the fingers move; the policy's by
-                           forward kinematics of the joint positions MultiStepWrapper records
-                           every step, since callbacks read the env at action-chunk ends only
+                           close command is issued, before the fingers move. The piece rotated
+                           about its z axis by a multiple of its shape's symmetry period looks
+                           the same, so the demonstration's tcp pose rotated so about the piece's
+                           start pose grips equivalent faces; the error is to the nearest of
+                           these tcp poses. The policy's tcp pose by forward kinematics of the joint
+                           positions MultiStepWrapper records every step, since callbacks read
+                           the env at action-chunk ends only
       grasp piece displacement
                            how far the gripper moves the piece while grasping it: translation and
                            rotation angle of the piece from its start pose to the step at which the
@@ -432,6 +441,7 @@ class GraspDeviationCallback(EvalCallback):
     def before_episode_start_after_env_reset(self, runner, *, episode_idx, init_state, expert_trajectory):
         self.demonstration = expert_trajectory
         self.start_yaw = _yaw_deg(init_state['actor_poses'][self.actor_key])
+        self.piece_start = _pose_matrix(init_state['actor_poses'][self.actor_key])
         self.gripper.reset()
         self.close_step = self.tcp_at_close = None
 
@@ -451,7 +461,7 @@ class GraspDeviationCallback(EvalCallback):
         return _pose_change(_pose_matrix(piece_poses[0]), _pose_matrix(piece_poses[end]))
 
     def after_env_step(self, runner, *, obs, action, reward, done, info, policy, env):
-        steps_since_close, _ = self.gripper.chunk_executed(env)
+        steps_since_close = self.gripper.chunk_executed(env)
         if steps_since_close is not None:
             joint_positions = _find_wrapper(env, MultiStepWrapper).traj_agent_proprio  # [i]: before the i-th action
             self.close_step = len(joint_positions) - 1 - steps_since_close
@@ -460,9 +470,10 @@ class GraspDeviationCallback(EvalCallback):
     def at_episode_end(self, runner, *, episode_idx, is_success, prefix, env, expert_trajectory, info):
         rollout = dict(start_yaw=self.start_yaw, is_success=is_success, closed=self.close_step is not None)
         if self.close_step is not None:
-            demonstration_close, _ = _demonstration_grasp_and_release(self.demonstration['gripper_action'])
-            rollout['grasp_position_error_mm'], rollout['grasp_rotation_error_deg'] = _pose_change(
-                _pose_matrix(self.demonstration['tcp_pose'][demonstration_close]), self.tcp_at_close)
+            demonstration_close = _demonstration_grasp(self.demonstration['gripper_action'])
+            rollout['grasp_position_error_mm'], rollout['grasp_rotation_error_deg'] = _symmetric_pose_change(
+                _pose_matrix(self.demonstration['tcp_pose'][demonstration_close]), self.tcp_at_close,
+                self.piece_start, _symmetry_period_deg(env))
             joint_positions = np.stack([qpos.cpu().numpy() for qpos in _find_wrapper(env, MultiStepWrapper).traj_agent_proprio])
             rollout['grasp_piece_displacement_mm'], rollout['grasp_piece_displacement_deg'] = self._piece_displacement(
                 _find_wrapper(env, ActorPoseRecordingWrapper).get_actor_poses(self.actor_name), joint_positions, self.close_step)
@@ -482,55 +493,31 @@ class GraspDeviationCallback(EvalCallback):
 
 
 class InsertionDeviationCallback(EvalCallback):
-    """How far the piece moves in the hand while it is held and how far it is from its hole just
-    before it comes down onto the board, next to the same for the demonstration of the same start
-    state (InsertFmbObjectFr3Env). Both read the exact steps: the piece from
-    ActorPoseRecordingWrapper, the tcp by forward kinematics of the joint positions
-    MultiStepWrapper records every step, the expert trajectory for the demonstration.
-      in-hand slip  translation [mm] and rotation angle [deg] of the piece's pose in the tcp frame
-                    from the step at which the fingers have stopped closing after the close
-                    command (where GraspDeviationCallback's grasp piece displacement ends) to the
-                    step before the gripper opens (the first gripper action above 0 after the close
-                    command), or to the last step if it never opens again
-      above hole    the last step before the lifted piece's bottom comes down to the board's top
-                    face: lateral offset of the piece frame's origin from the hole's in the table
-                    plane [mm], yaw error modulo the shape's symmetry period [deg], tilt [deg]
-    The hole is the env's hole_pose, the pose of the seated piece; the board does not move during
-    an episode, so it is the demonstration's too. Logs median / p5 / p95 / max over the rollouts
-    of the policy's metrics and, as the reference, of the demonstrations of the same start states,
-    and how many rollouts brought the piece down from above the board.
+    """How far the piece is from its hole just before it comes down onto the board, next to the
+    same for the demonstration of the same start state (InsertFmbObjectFr3Env), at the last step
+    before the lifted piece's bottom comes down to the board's top face: lateral offset of the piece
+    frame's origin from the hole's in the table plane [mm], yaw error [deg]: the piece's rotation
+    about its own z axis relative to the hole once the tilt is removed (a z-y-x Euler yaw mixes in
+    part of the tilt), from the nearest multiple of the shape's symmetry period, tilt [deg]. The piece rotated by a multiple of its symmetry period gives the same three errors.
+    The piece poses are the exact steps ActorPoseRecordingWrapper records, the expert trajectory's
+    for the demonstration. The hole is the env's hole_pose, the pose of the
+    seated piece; the board does not move during an episode, so it is the demonstration's too. Logs
+    median / p5 / p95 / max over the rollouts of the policy's metrics and, as the reference, of the
+    demonstrations of the same start states, and how many rollouts brought the piece down from above
+    the board.
 
-    Requires the joint positions as proprio (abs_joint_pos), ActorPoseRecordingWrapper and a
-    dataset whose expert trajectory holds agent_proprio, tcp_pose, gripper_action and actor_poses.
+    Requires ActorPoseRecordingWrapper and a dataset whose expert trajectory holds actor_poses.
     """
 
-    METRICS = ['slip_translation_mm', 'slip_rotation_deg',
-               'above_hole_lateral_offset_mm', 'above_hole_yaw_error_deg', 'above_hole_tilt_deg']
+    METRICS = ['above_hole_lateral_offset_mm', 'above_hole_yaw_error_deg', 'above_hole_tilt_deg']
     TOP_FACE_TOLERANCE = 0.001  # [m] above the board's top face that still counts as on it
 
     def __init__(self, actor_name: str):
         self.actor_name = actor_name
         self.actor_key = f'actor_pose_{actor_name}'
-        self.gripper = GripperEvents()
-
-    def at_run_start(self, runner, policy):
-        assert runner.representation_space == "abs_joint_pos", "the in-hand slip needs the joint positions as proprio"
 
     def before_episode_start_after_env_reset(self, runner, *, episode_idx, init_state, expert_trajectory):
         self.demonstration = expert_trajectory
-        self.gripper.reset()
-        self.close_step = self.release_step = None
-
-    def after_action_predict(self, runner, *, obs_dict, action, action_dict, policy, env):
-        self.gripper.chunk_predicted(action, env)
-
-    def after_env_step(self, runner, *, obs, action, reward, done, info, policy, env):
-        steps_since_close, steps_since_release = self.gripper.chunk_executed(env)
-        steps = len(_find_wrapper(env, MultiStepWrapper).traj_agent_proprio)
-        if steps_since_close is not None:
-            self.close_step = steps - 1 - steps_since_close
-        if steps_since_release is not None:
-            self.release_step = steps - 1 - steps_since_release
 
     def _above_hole_step(self, piece_poses):
         """The last step before the lifted piece's bottom comes down to the board's top face, None
@@ -544,43 +531,26 @@ class InsertionDeviationCallback(EvalCallback):
 
     def _hole_errors(self, piece):
         relative = self.hole[:3, :3].T @ piece[:3, :3]
-        yaw = np.degrees(np.arctan2(relative[1, 0], relative[0, 0]))
+        qx, qy, qz, qw = Rotation.from_matrix(relative).as_quat()
+        yaw = np.degrees(2 * np.arctan2(qz, qw))  # dropping qx, qy removes the tilt; what remains is the rotation about the piece's own z axis
         period = self.symmetry_period_deg
         return dict(above_hole_lateral_offset_mm=1000 * np.linalg.norm(piece[:2, 3] - self.hole[:2, 3]),
                     above_hole_yaw_error_deg=abs((yaw + period / 2) % period - period / 2),
                     above_hole_tilt_deg=np.degrees(np.arccos(np.clip(relative[2, 2], -1, 1))))
 
-    @staticmethod
-    def _slip(tcp_start, piece_start, tcp_end, piece_end):
-        return dict(zip(('slip_translation_mm', 'slip_rotation_deg'),
-                        _pose_change(np.linalg.inv(tcp_start) @ piece_start, np.linalg.inv(tcp_end) @ piece_end)))
-
     def at_episode_end(self, runner, *, episode_idx, is_success, prefix, env, expert_trajectory, info):
         self.hole = _pose_matrix(_find_env_attr(env, "hole_pose").raw_pose[0].cpu().numpy())
-        self.symmetry_period_deg = _find_env_attr(env, "SYMMETRY_PERIOD_DEG")[_find_env_attr(env, "piece").shape]
+        self.symmetry_period_deg = _symmetry_period_deg(env)
         self.board_height = _find_env_attr(env, "board").HEIGHT
         rollout = {}
 
         piece_poses = _find_wrapper(env, ActorPoseRecordingWrapper).get_actor_poses(self.actor_name)
-        joint_positions = np.stack([qpos.cpu().numpy() for qpos in _find_wrapper(env, MultiStepWrapper).traj_agent_proprio])
         above_hole = self._above_hole_step(piece_poses)
         if above_hole is not None:
             rollout.update(self._hole_errors(_pose_matrix(piece_poses[above_hole])))
-        if self.close_step is not None:
-            held = _fingers_stopped_step(joint_positions, self.close_step)
-            released = len(piece_poses) - 1 if self.release_step is None else self.release_step - 1
-            if held is not None and held < released:
-                rollout.update(self._slip(_tcp_pose(env, joint_positions[held]), _pose_matrix(piece_poses[held]),
-                                          _tcp_pose(env, joint_positions[released]), _pose_matrix(piece_poses[released])))
 
         demonstration_pieces = self.demonstration['actor_poses'][self.actor_key]
-        demonstration_tcp = self.demonstration['tcp_pose']
-        demonstration_close, demonstration_release = _demonstration_grasp_and_release(self.demonstration['gripper_action'])
-        held = _fingers_stopped_step(self.demonstration['agent_proprio'], demonstration_close)
-        released = len(demonstration_pieces) - 1 if demonstration_release is None else demonstration_release - 1
-        demonstration = self._slip(_pose_matrix(demonstration_tcp[held]), _pose_matrix(demonstration_pieces[held]),
-                                   _pose_matrix(demonstration_tcp[released]), _pose_matrix(demonstration_pieces[released]))
-        demonstration.update(self._hole_errors(_pose_matrix(demonstration_pieces[self._above_hole_step(demonstration_pieces)])))
+        demonstration = self._hole_errors(_pose_matrix(demonstration_pieces[self._above_hole_step(demonstration_pieces)]))
         rollout.update({f'demonstration_{key}': value for key, value in demonstration.items()})
         return rollout
 
