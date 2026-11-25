@@ -11,15 +11,10 @@ Adding a new use case = adding a new builder here + a config pointing at it.
 import argparse
 import json
 
-# NOTE: importing the gsworld wrappers appends GS_DIR to sys.path, which is what makes the
-# top-level `arguments` module importable — so this import MUST precede `from arguments ...`.
-from gsworld.mani_skill.utils.wrappers import WristCamGSWorldWrapper
-from arguments import PipelineParams
 from omegaconf import OmegaConf
 
 from gsplat_envs.mani_skill.sensors import depth_obs_key
 from diffusion_policy_3d.dataset.multi_memmap_dataset import dataset_attrs, discover_dataset_paths
-from diffusion_policy_3d.env.maniskill.observation_wrapper.gaussian_splatting.maniskill_wrist_cam_gs_wrapper import WristCamGSManiskillDP3Wrapper
 from diffusion_policy_3d.baseline_scene_integration.roi_selection import HOLE_MARGIN
 from diffusion_policy_3d.env.maniskill.observation_wrapper.pcd.maniskill_pcd_wrapper import FusedPCDManiSkillDP3Wrapper, PhasedROIManiSkillDP3Wrapper, SingleStepPCDManiSkillDP3Wrapper
 from diffusion_policy_3d.env.maniskill.observation_wrapper.pcd.maniskill_pcd_spatial_memory_wrapper import SpatialMemoryPCDManiSkillDP3Wrapper
@@ -45,6 +40,13 @@ def wrist_cam_online_gaussian_splatting(
     """
     assert representation_space in ("abs_joint_pos", "relative_ee_pose"), \
         f"representation_space must be 'abs_joint_pos' or 'relative_ee_pose', got '{representation_space}'"
+
+    # gsworld is installed only in the Gaussian-splatting environments
+    # NOTE: importing the gsworld wrappers appends GS_DIR to sys.path, which is what makes the
+    # top-level `arguments` module importable — so this import MUST precede `from arguments ...`.
+    from gsworld.mani_skill.utils.wrappers import WristCamGSWorldWrapper
+    from arguments import PipelineParams
+    from diffusion_policy_3d.env.maniskill.observation_wrapper.gaussian_splatting.maniskill_wrist_cam_gs_wrapper import WristCamGSManiskillDP3Wrapper
 
     robot_pipe = PipelineParams(argparse.ArgumentParser())
     env = WristCamGSWorldWrapper(

@@ -31,7 +31,6 @@ import torch
 import torch.multiprocessing
 import tqdm
 
-import gsworld       # imported before gymnasium to register the GS wrappers' env side
 import gsplat_envs   # registers our envs and agents (tasks moved out of the GSWorld fork)
 import gymnasium
 from diffusion_policy_3d.policy.base_policy import BasePolicy

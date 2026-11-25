@@ -1,6 +1,5 @@
 import torch
 from pytorch3d.ops import sample_farthest_points, ball_query
-from gsworld.constants import fr3_gs_semantics
 
 from diffusion_policy_3d.baseline_scene_integration.perception_utils import (
     farthest_point_downsample,
@@ -369,6 +368,9 @@ class GaussianRobotPoseJitter:
         return jittered_qpos
 
     def __call__(self, batch):
+        # gsworld is installed only in the Gaussian-splatting environments
+        from gsworld.constants import fr3_gs_semantics
+
         if self.base_limit == 0.0 and self.wrist_limit == 0.0:
             print("Returning batch without GaussianRobotPoseJitter Augmentation")
             return batch
