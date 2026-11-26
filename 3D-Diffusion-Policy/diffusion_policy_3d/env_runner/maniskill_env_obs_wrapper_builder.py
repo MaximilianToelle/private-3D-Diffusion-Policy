@@ -159,7 +159,7 @@ def fused_pcd(
     assert base_env.unwrapped.obs_mode == "state_dict", (
         "the fused point-cloud wrapper renders the cameras itself, so ManiSkill must not render in "
         f"its step (obs_mode state_dict), got '{base_env.unwrapped.obs_mode}'")
-    assert base_env.unwrapped.depth_mode is None, (
+    assert base_env.unwrapped.depth_mode == "gt", (
         "the fused point-cloud wrapper reads the renderer's ground-truth depth only, not a depth_mode's")
     composed = scene_representation_of_datasets(base_env, scene_representation, dataset_path)
     moving_actors = {tuple(dataset_attrs(path)["moving_actors"]) for path in discover_dataset_paths(dataset_path)}
@@ -202,7 +202,7 @@ def phased_roi_pcd(
     assert base_env.unwrapped.obs_mode == "state_dict", (
         "the phased point-cloud wrapper renders the cameras itself, so ManiSkill must not render in "
         f"its step (obs_mode state_dict), got '{base_env.unwrapped.obs_mode}'")
-    assert base_env.unwrapped.depth_mode is None, (
+    assert base_env.unwrapped.depth_mode == "gt", (
         "the phased point-cloud wrapper reads the renderer's ground-truth depth only, not a depth_mode's")
     composed = scene_representation_of_datasets(base_env, scene_representation, dataset_path)
     for path in discover_dataset_paths(dataset_path):

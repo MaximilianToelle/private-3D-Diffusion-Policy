@@ -59,7 +59,7 @@ env_runner:
   task_callbacks: ${task.callbacks}
   # the scene representation
   obs_mode: ${scene_representation.obs_mode}
-  depth_mode: ${eval:'{"gt":None,"ffs":"fast_foundation_stereo"}["${scene_representation.depth}"]'}
+  depth_mode: ${eval:'{"gt":"gt","ffs":"fast_foundation_stereo"}["${scene_representation.depth}"]'}
   maniskill_env_obs_wrapper_builder: ${scene_representation.obs_wrapper_builder}
   dataset_path: ${data.dataset_path}
   obs_key_aliases: ${scene_representation.obs_key_aliases}

@@ -87,7 +87,7 @@ class ManiSkillRunner(BaseRunner):
         n_action_steps: int = 8,
         max_steps: int = 1000,
         device: str = "cuda:0",
-        depth_mode: str = None,     # None (gt) | fast_foundation_stereo, the depth the datasets were converted from
+        depth_mode: str = "gt",     # gt | fast_foundation_stereo, the depth the datasets were converted from
     ):
         # a rollout worker builds its own runner from these
         self.init_kwargs = {key: value for key, value in locals().items() if key not in ("self", "__class__")}
